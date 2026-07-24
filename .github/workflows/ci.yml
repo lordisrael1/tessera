@@ -1,0 +1,29 @@
+name: ci
+
+# Correctness comes from CI; performance numbers NEVER do (shared runners +
+# thermals = flaky). CI runners are not Zen 3, so we build with x86-64-v3 and
+# rely on the runtime-dispatched generic GEMM fallback (added in M2).
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        config: [release, asan]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y g++-13 cmake ninja-build
+      - name: Configure (release)
+        if: matrix.config == 'release'
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++-13 -DCMAKE_CXX_FLAGS="-march=x86-64-v3"
+      - name: Configure (asan)
+        if: matrix.config == 'asan'
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DTESSERA_SANITIZE=ON -DCMAKE_CXX_COMPILER=g++-13
+      - name: Build
+        run: cmake --build build
+      - name: Test
+        run: ctest --test-dir build --output-on-failure

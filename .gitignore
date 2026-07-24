@@ -1,0 +1,35 @@
+# Build trees
+build/
+build-*/
+*.o
+*.obj
+*.a
+*.so
+*.dll
+*.exe
+
+# Model weights — NEVER commit these
+*.safetensors
+*.bin
+*.gguf
+models/
+weights/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+compile_commands.json
+.cache/
+
+# ccache
+.ccache/
+
+# Generated golden data (regenerate via tools/)
+test/golden/*.bin
