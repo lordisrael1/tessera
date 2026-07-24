@@ -10,11 +10,20 @@ Last updated: 2026-07-24
 
 ## TL;DR state
 
-- **Milestone M0 (bootstrap): essentially done.** Repo scaffold, portable core
-  library, and a dependency-free test suite exist. Toolchain being installed.
-- **Milestone M1 (reference forward pass): started.** Core plumbing done
-  (safetensors reader, config loader, scalar ops). Not yet done: tokenizer,
-  the assembled forward pass, and the HuggingFace oracle.
+- **Milestone M0 (bootstrap): DONE.** Repo scaffold, portable core library,
+  dependency-free tests, toolchain (WSL g++/cmake/ninja), CI, docs.
+- **Milestone M1 (reference forward pass): FUNCTIONALLY WORKING.** The full
+  Qwen2.5-0.5B fp32 forward pass runs end to end and generates correct text:
+  `"The capital of France is"` -> `"Paris. It is the largest city in Europe..."`.
+  Tokenizer, KV cache, GQA attention, split-half RoPE, SwiGLU, tied-embedding
+  logits all implemented and qualitatively validated.
+  - **Remaining for M1 to be officially "done":** the NUMERICAL oracle
+    (`dump_logits.py` + `logit_parity` test, <1e-3 vs HuggingFace). That needs
+    PyTorch (~2 GB), which is not installed yet. Coherent generation is strong
+    evidence of correctness but is NOT the oracle the charter requires.
+  - Model is downloaded and byte-exact (988,097,824 bytes). Perf: scalar path
+    ~1.4 s/token, ~32 s weight load (bf16->f32). Both are fine for a reference
+    path; M2 makes them fast. Activation high-water = 79.1 KB/token (feeds M3).
 
 ## Environment (verified 2026-07-24)
 
@@ -44,25 +53,35 @@ Last updated: 2026-07-24
 - `src/core/json.h` — hand-written JSON parser (no nlohmann).
 - `src/core/safetensors.{h,cpp}` — mmap'd zero-copy reader, `load_as_f32`.
 - `src/model/config.{h,cpp}` — `ModelConfig::from_json_file`, GQA/tie helpers.
+  Verified against the real Qwen2.5-0.5B config.json.
 - `src/ops/ops.{h,cpp}` — scalar rmsnorm, rope (split-half), softmax, silu_mul,
-  gemm_ref. **These are the oracle.**
-- `test/test_core.cpp`, `test/test_ops.cpp` — unit tests, all with known-value
-  assertions. Run via `ctest`.
+  gemm_ref, **linear** (HF [OUT,IN] weight-stationary). **These are the oracle.**
+- `src/tokenizer/bpe.{h,cpp}` — byte-level BPE. Merge loop + byte tables fully
+  real; pretokenizer is the one documented approximation. Validated against the
+  real 151936-token vocab (`"The capital of France is"` -> 5 tokens, id0=785).
+- `src/model/kv_cache.{h,cpp}` — one up-front slab, sized by KV heads (GQA).
+- `src/model/qwen2.{h,cpp}` — the forward pass. `prefill()` + `decode_step()`.
+  Config-driven: conditional biases (load when present) + conditional lm_head
+  (only when NOT tied). Generates correct text end to end.
+- `tools/run_infer.cpp` — greedy inference driver (built as `run_infer`).
+- `test/test_*.cpp` — core, ops, tokenizer. All green via `ctest` (3/3).
 
-## What does NOT exist yet (the M1 to-do list, in order)
+## What does NOT exist yet — THE single remaining M1 task
 
-1. **`tools/fetch_model.sh`** — download Qwen2.5-0.5B-Instruct (model.safetensors
-   ~1GB, tokenizer.json, config.json) into `models/qwen2.5-0.5b/`. NOT written yet.
-2. **Verify config loader** against the real `config.json` (needs the download).
-3. **Tokenizer** (`src/tokenizer/bpe.{h,cpp}`) — byte-level BPE encode/decode.
-   Budget 3–4 days. Pragmatic shortcut: precompute pretokenized pieces in Python
-   for test prompts; implement the merge loop + byte-decoder in C++. NOT started.
-4. **KV cache** (`src/model/kv_cache.{h,cpp}`) — sized by KV heads. NOT started.
-5. **Attention + forward pass** (`src/model/qwen2.{h,cpp}`) — assemble the 24-layer
-   forward with `prefill()` and `decode_step()` entry points. NOT started.
-6. **The oracle** (`tools/dump_logits.py` + `test/logit_parity.cpp`) — dump HF
-   fp32 logits + greedy tokens for 3 prompts; assert max-abs < 1e-3 and exact
-   greedy match. **This test is the constitution of the repo.** NOT started.
+**The numerical oracle.** Everything else in M1 is built and working. What's left:
+
+1. **Install PyTorch + transformers (CPU)** — user's call, ~2 GB:
+   `pip3 install --break-system-packages torch transformers safetensors huggingface_hub --index-url https://download.pytorch.org/whl/cpu`
+2. **Run `tools/dump_logits.py`** (already written) to emit HF fp32 logits +
+   greedy tokens for 3 fixed prompts into `test/golden/`.
+3. **Write `test/logit_parity.cpp`** — run our stack, assert max-abs < 1e-3 on
+   logits and exact greedy-token match. **This test is the constitution of the
+   repo** and the official M1 gate. Wire it into CTest so it self-skips when the
+   golden files are absent (keeps CI green without the model).
+
+Optional polish (not blocking M1): SIMD/perf is M2; the tokenizer pretokenizer
+approximation should be cross-checked against a HF token-id golden dump
+(`tools/dump_tokenizer_golden.py`, not yet written) once transformers is present.
 
 ## How to build (THE working path — WSL Ubuntu)
 

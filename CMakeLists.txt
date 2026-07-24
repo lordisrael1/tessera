@@ -41,5 +41,6 @@ if(TESSERA_TSAN AND NOT MSVC)
 endif()
 
 add_subdirectory(src)
+add_subdirectory(tools)
 enable_testing()
 add_subdirectory(test)

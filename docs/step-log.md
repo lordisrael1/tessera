@@ -5,6 +5,63 @@ page. Brutal and honest: what worked, what's fake, what's left.
 
 ---
 
+## 2026-07-24 — Session 2: M1 forward pass runs, model says "Paris"
+
+### The headline
+A from-scratch C++ Qwen2.5-0.5B forward pass runs end to end and generates
+correct text: **"The capital of France is" -> "Paris. It is the largest city in
+Europe and the third"**. A second prompt: "Once upon a time" -> "there was a
+young man named John". Fluent, factual output is strong evidence every op is
+right — a wrong RoPE convention or GQA head mapping yields garbage, not this.
+
+### What we built
+- **Tokenizer** (`src/tokenizer/bpe.{h,cpp}`): the real byte-level BPE — the
+  256-byte->unicode map + inverse, the HF merge-loop algorithm, vocab/merges
+  loaded from tokenizer.json. The ONE documented shortcut is the pretokenizer
+  regex (unicode \p{L}/\p{N} are misery in C++): we hand-write a splitter that's
+  exact for ASCII (all three oracle prompts are digit-free) and treats UTF-8
+  multibyte as letters. Tested offline (synthetic fixture proves the merge loop)
+  AND against the real 151936 vocab.
+- **`ops::linear`**: HF stores nn.Linear.weight as [OUT,IN]; this is
+  weight-stationary Y[o]=dot(X,W[o,:])+b[o], so we never transpose a projection.
+- **KV cache** (`src/model/kv_cache.{h,cpp}`): one up-front slab, sized by
+  num_key_value_heads (2), not attention heads (14) — the 7x GQA saving.
+- **Qwen2 forward** (`src/model/qwen2.{h,cpp}`): embed -> 24x[rmsnorm -> QKV(+bias)
+  -> rope -> GQA causal attention -> o_proj -> residual -> rmsnorm -> SwiGLU ->
+  residual] -> final rmsnorm -> tied logits. Activations come from one Arena,
+  reset per token; `high_water()` reports **79.1 KB/token** — the real number
+  that will size M3's scratchpad. Two entry points from day one: prefill() and
+  decode_step().
+- **Config-driven loader** (per the flow diagram): conditional Q/K/V biases
+  (load "when present"), conditional lm_head (load only when NOT tied). Nothing
+  hardcoded that the config already states.
+- **`run_infer`** driver ties tokenizer + config + model into greedy generation.
+
+### The download saga (brutal, honest)
+The model download was a fight. The naive `curl -o` **silently truncated** the
+weights at ~72% (connection dropped; the file looked "done"). We caught it by
+computing the byte-exact expected size (988,097,824) from the safetensors header
+itself, then resumed. `curl -C -` failed too (HTTP/2 stream CANCEL on this
+flaky link). Fixed with a `wget -c` retry LOOP in a script file (nested-quote
+hell through PowerShell->WSL->bash kept breaking inline commands) that grinds
+through drops until byte-exact. `fetch_model.sh` now has a size sanity gate so a
+truncated model can never silently pass again. Lesson worth keeping: **verify
+downloads against a known-exact size, never trust "it finished."**
+
+### What is REAL vs still MISSING
+- **Real & working:** tokenizer, KV cache, forward pass, run_infer. Build clean
+  (zero warnings at -Wall -Wextra -Wshadow -Wconversion), ctest 3/3 green.
+- **Still missing for M1 to be officially done:** the NUMERICAL oracle
+  (logit parity < 1e-3 vs HuggingFace). Needs PyTorch (~2 GB, not installed).
+  Coherent text is qualitative; the charter demands the numeric gate. That is
+  the one and only remaining M1 task. See PROGRESS.md.
+
+### Perf notes (reference path, expected-slow)
+~32 s weight load (scalar bf16->f32 of 494M params), ~1.4 s/token scalar
+forward. Fine for a reference/oracle; making it fast IS Milestone 2.
+
+---
+
 ## 2026-07-24 — Session 1: bootstrap (M0) + M1 plumbing
 
 ### The reality we hit

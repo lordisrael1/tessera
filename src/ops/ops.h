@@ -29,4 +29,11 @@ void silu_mul(const float* gate, const float* up, float* out, int64_t n);
 void gemm_ref(const float* A, const float* B, const float* bias, float* C,
               int64_t M, int64_t K, int64_t N);
 
+// A transformer linear layer with HuggingFace weight layout.
+// W is [OUT, IN] row-major (the way HF stores nn.Linear.weight), so this is
+// weight-stationary: Y[m,o] = sum_k X[m,k] * W[o,k] + bias[o]. Avoids
+// transposing every projection matrix at load time. Accumulate in double.
+void linear(const float* X, const float* W, const float* bias, float* Y,
+            int64_t M, int64_t IN, int64_t OUT);
+
 }  // namespace ops

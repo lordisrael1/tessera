@@ -29,12 +29,27 @@ for f in ("config.json", "tokenizer.json", "tokenizer_config.json",
 PY
 else
   echo "huggingface_hub not found; falling back to curl from the HF resolve URL."
+  echo "   (-C - resumes partial files, --retry survives dropped connections —"
+  echo "    a naive 'curl -o' silently leaves TRUNCATED weights, which was a real bug.)"
   BASE="https://huggingface.co/$REPO/resolve/main"
   for f in config.json tokenizer.json tokenizer_config.json generation_config.json model.safetensors; do
     echo "  curl $f"
-    curl -L --fail -o "$DEST/$f" "$BASE/$f" || echo "  (failed: $f)"
+    curl -L -C - --retry 5 --retry-delay 3 --fail -o "$DEST/$f" "$BASE/$f" \
+      || echo "  (failed: $f)"
   done
 fi
 
+# Sanity gate: the weights must be ~988 MB. A truncated file is worse than no
+# file because everything downstream produces plausible garbage.
+MODEL="$DEST/model.safetensors"
+if [ -f "$MODEL" ]; then
+  sz=$(stat -c %s "$MODEL" 2>/dev/null || stat -f %z "$MODEL")
+  echo ">> model.safetensors = $sz bytes"
+  if [ "$sz" -lt 980000000 ]; then
+    echo "!! WARNING: expected ~988 MB (494M params x 2 bytes bf16). This looks"
+    echo "!! TRUNCATED. Re-run this script — curl -C - will resume from here."
+    exit 1
+  fi
+fi
+
 echo ">> Done. Point the loader at $DEST"
-echo "   du -h $DEST/model.safetensors"

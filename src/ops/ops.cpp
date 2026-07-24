@@ -60,4 +60,18 @@ void gemm_ref(const float* A, const float* B, const float* bias, float* C,
     }
 }
 
+void linear(const float* X, const float* W, const float* bias, float* Y,
+            int64_t M, int64_t IN, int64_t OUT) {
+    for (int64_t m = 0; m < M; ++m) {
+        const float* xrow = X + m * IN;
+        for (int64_t o = 0; o < OUT; ++o) {
+            const float* wrow = W + o * IN;
+            double acc = bias ? static_cast<double>(bias[o]) : 0.0;
+            for (int64_t k = 0; k < IN; ++k)
+                acc += static_cast<double>(xrow[k]) * wrow[k];
+            Y[m * OUT + o] = static_cast<float>(acc);
+        }
+    }
+}
+
 }  // namespace ops
