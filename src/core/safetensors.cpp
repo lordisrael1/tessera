@@ -15,6 +15,17 @@
 #  include <unistd.h>
 #endif
 
+// 0 == "unknown, don't size-check".
+static size_t dtype_size(DType d) {
+    switch (d) {
+        case DType::F32: case DType::I32: return 4;
+        case DType::F16: case DType::BF16: return 2;
+        case DType::I64: return 8;
+        case DType::I8: case DType::U8: case DType::BOOL: return 1;
+        case DType::UNKNOWN: default: return 0;
+    }
+}
+
 static DType parse_dtype(const std::string& s) {
     if (s == "F32") return DType::F32;
     if (s == "F16") return DType::F16;
@@ -59,21 +70,40 @@ SafeTensors::SafeTensors(const std::string& path) {
     if (map_size_ < 8) throw std::runtime_error("safetensors: file too small");
     uint64_t header_len;
     std::memcpy(&header_len, base, 8);
-    if (8 + header_len > map_size_) throw std::runtime_error("safetensors: bad header length");
+    if (header_len > map_size_ - 8) throw std::runtime_error("safetensors: bad header length");
 
     std::string header(reinterpret_cast<const char*>(base + 8), header_len);
     const uint8_t* blob = base + 8 + header_len;
+    const uint64_t blob_size = map_size_ - 8 - header_len;
 
+    // Every offset is validated against the mapping. This is not paranoia: a
+    // truncated download (see docs/step-log.md — curl silently cut the weights
+    // at 72% and the file "looked done") produces a header that promises data
+    // the file does not contain. Without this check the first symptom is a
+    // SIGSEGV deep inside load_as_f32, or worse, silent garbage weights.
     JsonValue root = parse_json(header);
     for (const auto& [name, info] : root.obj) {
         if (name == "__metadata__") continue;
         TensorInfo t;
         t.dtype = parse_dtype(info["dtype"].as_string());
         for (const auto& d : info["shape"].arr) t.shape.push_back(d.as_int());
+
         int64_t begin = info["data_offsets"].arr[0].as_int();
         int64_t end   = info["data_offsets"].arr[1].as_int();
+        if (begin < 0 || end < begin || static_cast<uint64_t>(end) > blob_size)
+            throw std::runtime_error(
+                "safetensors: tensor '" + name + "' offsets [" + std::to_string(begin) + "," +
+                std::to_string(end) + ") escape the " + std::to_string(blob_size) +
+                "-byte blob — the file is TRUNCATED or corrupt");
+
         t.data = blob + begin;
         t.nbytes = static_cast<size_t>(end - begin);
+
+        size_t esz = dtype_size(t.dtype);
+        if (esz != 0 && t.nbytes != static_cast<size_t>(t.numel()) * esz)
+            throw std::runtime_error("safetensors: tensor '" + name + "' byte span " +
+                                     std::to_string(t.nbytes) + " != numel*" +
+                                     std::to_string(esz));
         tensors_.emplace(name, std::move(t));
     }
 }

@@ -60,6 +60,37 @@ class JsonParser {
         if (get() != c) throw std::runtime_error(std::string("json: expected '") + c + "'");
     }
 
+    uint32_t read_hex4() {
+        uint32_t cp = 0;
+        for (int k = 0; k < 4; ++k) {
+            char h = get();
+            cp <<= 4;
+            if (h >= '0' && h <= '9') cp |= static_cast<uint32_t>(h - '0');
+            else if (h >= 'a' && h <= 'f') cp |= static_cast<uint32_t>(h - 'a' + 10);
+            else if (h >= 'A' && h <= 'F') cp |= static_cast<uint32_t>(h - 'A' + 10);
+            else throw std::runtime_error("json: bad \\u escape");
+        }
+        return cp;
+    }
+
+    static void utf8_encode(std::string& out, uint32_t cp) {
+        if (cp < 0x80) {
+            out += static_cast<char>(cp);
+        } else if (cp < 0x800) {
+            out += static_cast<char>(0xC0 | (cp >> 6));
+            out += static_cast<char>(0x80 | (cp & 0x3F));
+        } else if (cp < 0x10000) {
+            out += static_cast<char>(0xE0 | (cp >> 12));
+            out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            out += static_cast<char>(0x80 | (cp & 0x3F));
+        } else {
+            out += static_cast<char>(0xF0 | (cp >> 18));
+            out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+            out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            out += static_cast<char>(0x80 | (cp & 0x3F));
+        }
+    }
+
     std::string parse_string() {
         expect('"');
         std::string out;
@@ -78,26 +109,22 @@ class JsonParser {
                     case 'b': out += '\b'; break;
                     case 'f': out += '\f'; break;
                     case 'u': {
-                        // Minimal \uXXXX -> UTF-8. Enough for tokenizer/config.
-                        int cp = 0;
-                        for (int k = 0; k < 4; ++k) {
-                            char h = get();
-                            cp <<= 4;
-                            if (h >= '0' && h <= '9') cp |= h - '0';
-                            else if (h >= 'a' && h <= 'f') cp |= h - 'a' + 10;
-                            else if (h >= 'A' && h <= 'F') cp |= h - 'A' + 10;
-                            else throw std::runtime_error("json: bad \\u escape");
+                        uint32_t cp = read_hex4();
+                        // Surrogate pair: JSON encodes astral codepoints (emoji,
+                        // rare CJK) as \uD800-\uDBFF followed by \uDC00-\uDFFF.
+                        // Decoding the halves independently yields two garbage
+                        // 3-byte sequences, so join them here.
+                        if (cp >= 0xD800 && cp <= 0xDBFF && i_ + 1 < s_.size() &&
+                            s_[i_] == '\\' && s_[i_ + 1] == 'u') {
+                            size_t save = i_;
+                            i_ += 2;
+                            uint32_t lo = read_hex4();
+                            if (lo >= 0xDC00 && lo <= 0xDFFF)
+                                cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                            else
+                                i_ = save;  // not a valid pair; leave it alone
                         }
-                        if (cp < 0x80) {
-                            out += static_cast<char>(cp);
-                        } else if (cp < 0x800) {
-                            out += static_cast<char>(0xC0 | (cp >> 6));
-                            out += static_cast<char>(0x80 | (cp & 0x3F));
-                        } else {
-                            out += static_cast<char>(0xE0 | (cp >> 12));
-                            out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-                            out += static_cast<char>(0x80 | (cp & 0x3F));
-                        }
+                        utf8_encode(out, cp);
                         break;
                     }
                     default: throw std::runtime_error("json: bad escape");
@@ -191,6 +218,16 @@ public:
     explicit JsonParser(std::string_view s) : s_(s) {}
     JsonValue parse() {
         JsonValue v = parse_value();
+        // safetensors pads its header to an 8-byte boundary with spaces (and
+        // some writers use NULs), so those are legal trailers. Anything else
+        // means we parsed a prefix of something we did not understand, and
+        // silently accepting that is how you end up debugging "half the tensors
+        // are missing".
+        while (i_ < s_.size() && (s_[i_] == ' ' || s_[i_] == '\t' || s_[i_] == '\n' ||
+                                  s_[i_] == '\r' || s_[i_] == '\0'))
+            ++i_;
+        if (i_ != s_.size())
+            throw std::runtime_error("json: trailing data after root value");
         return v;
     }
 };

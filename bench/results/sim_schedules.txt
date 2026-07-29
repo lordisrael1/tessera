@@ -1,0 +1,24 @@
+--- double-buffered, coarse deps (the ISA as specified) ---
+pos  0  BIT-EXACT      4461 instrs    25242004 cycles (25.24 ms @1GHz)  MAC util  66.4%  DMA stall  33.6%   [compile 0.00s sim 0.4s]
+M3 GATE: every logit bit-identical to the CPU fp32 path.
+  array occupancy      66.4% of cycles the MXU was busy
+  array EFFICIENCY     2.88% of the MACs it could have retired while busy
+     not by its size and not by DMA (the weight stream alone would need
+--- double-buffered, fine deps ---
+pos  0  BIT-EXACT      4461 instrs    18361229 cycles (18.36 ms @1GHz)  MAC util  91.3%  DMA stall  10.6%   [compile 0.00s sim 0.5s]
+M3 GATE: every logit bit-identical to the CPU fp32 path.
+  array occupancy      91.3% of cycles the MXU was busy
+  array EFFICIENCY     2.88% of the MACs it could have retired while busy
+     not by its size and not by DMA (the weight stream alone would need
+--- serial, coarse deps ---
+pos  0  BIT-EXACT      4461 instrs    25242004 cycles (25.24 ms @1GHz)  MAC util  66.4%  DMA stall  33.6%   [compile 0.00s sim 0.4s]
+M3 GATE: every logit bit-identical to the CPU fp32 path.
+  array occupancy      66.4% of cycles the MXU was busy
+  array EFFICIENCY     2.88% of the MACs it could have retired while busy
+     not by its size and not by DMA (the weight stream alone would need
+--- serial, fine deps ---
+pos  0  BIT-EXACT      4461 instrs    25242004 cycles (25.24 ms @1GHz)  MAC util  66.4%  DMA stall  33.6%   [compile 0.00s sim 0.6s]
+M3 GATE: every logit bit-identical to the CPU fp32 path.
+  array occupancy      66.4% of cycles the MXU was busy
+  array EFFICIENCY     2.88% of the MACs it could have retired while busy
+     not by its size and not by DMA (the weight stream alone would need

@@ -1,0 +1,8 @@
+{
+  "prompts": [
+    "The capital of France is",
+    "def fibonacci(n):",
+    "Once upon a time, in a land far away,"
+  ],
+  "steps": 64
+}

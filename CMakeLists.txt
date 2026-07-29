@@ -42,5 +42,6 @@ endif()
 
 add_subdirectory(src)
 add_subdirectory(tools)
+add_subdirectory(bench)
 enable_testing()
 add_subdirectory(test)

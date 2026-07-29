@@ -1,0 +1,13 @@
+{
+  "prompt": "The capital of France is",
+  "prompt_ids": [
+    785,
+    6722,
+    315,
+    9625,
+    374
+  ],
+  "vocab": 151936,
+  "hidden": 896,
+  "steps": 64
+}

@@ -1,0 +1,12 @@
+{
+  "prompt": "def fibonacci(n):",
+  "prompt_ids": [
+    750,
+    75698,
+    1445,
+    1648
+  ],
+  "vocab": 151936,
+  "hidden": 896,
+  "steps": 64
+}

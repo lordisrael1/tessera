@@ -1,0 +1,19 @@
+{
+  "prompt": "Once upon a time, in a land far away,",
+  "prompt_ids": [
+    12522,
+    5193,
+    264,
+    882,
+    11,
+    304,
+    264,
+    4268,
+    3041,
+    3123,
+    11
+  ],
+  "vocab": 151936,
+  "hidden": 896,
+  "steps": 64
+}

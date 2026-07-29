@@ -1,0 +1,38 @@
+ModelConfig{
+  hidden_size=896
+  intermediate_size=4864
+  num_hidden_layers=24
+  num_attention_heads=14 (head_dim=64)
+  num_key_value_heads=2 (q_per_kv=7)
+  vocab_size=151936
+  rms_norm_eps=1e-06
+  rope_theta=1e+06
+  tie_word_embeddings=true
+}
+prompt = "The capital of France is"  (5 tokens)
+weights loaded in 44.93 s  (int8, 947 MB resident)
+
+The capital of France is Paris. It is the largest city in Europe and the third largest in the world. It is located in the south of France, on the banks of the River
+
+[32 greedy tokens generated]
+decode: 48.9 ms/token (20.46 tok/s), effective weight bandwidth 19.4 GB/s
+activation high-water = 79.2 KB per token
+ModelConfig{
+  hidden_size=896
+  intermediate_size=4864
+  num_hidden_layers=24
+  num_attention_heads=14 (head_dim=64)
+  num_key_value_heads=2 (q_per_kv=7)
+  vocab_size=151936
+  rms_norm_eps=1e-06
+  rope_theta=1e+06
+  tie_word_embeddings=true
+}
+prompt = "The capital of France is"  (5 tokens)
+weights loaded in 14.43 s  (fp32, 1976 MB resident)
+
+The capital of France is Paris. It is the largest city in Europe and the third largest city in the world. It is located in the south of France, on the banks of the
+
+[32 greedy tokens generated]
+decode: 102.4 ms/token (9.77 tok/s), effective weight bandwidth 19.3 GB/s
+activation high-water = 79.2 KB per token

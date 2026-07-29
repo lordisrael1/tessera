@@ -36,6 +36,11 @@ public:
     int64_t kv_dim() const { return kv_dim_; }         // kv_heads * head_dim
     int64_t bytes() const { return 2 * n_layers_ * max_seq_ * kv_dim_ * (int64_t)sizeof(float); }
 
+    // Throws if position `pos` would not fit. Called ONCE per token by the model
+    // (not per k_at()) so the hot path stays branch-free while an over-long
+    // prompt still fails loudly instead of scribbling past the slab.
+    void require_pos(int64_t pos) const;
+
 private:
     int64_t n_layers_, kv_dim_, max_seq_, len_ = 0;
     std::unique_ptr<float[]> k_, v_;

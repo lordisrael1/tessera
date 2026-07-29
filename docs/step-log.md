@@ -5,6 +5,122 @@ page. Brutal and honest: what worked, what's fake, what's left.
 
 ---
 
+## 2026-07-29 — Session 4: M3 lands — the real model runs on the fake chip
+
+> **Gap in this log.** Session 3 is missing: it produced the M1 numerical oracle
+> (`dump_logits.py`, `logit_parity`), all of M2's kernel work (`quant`,
+> `gemm_avx2`, `threadpool`, `linear_f32`), the benchmarks, and the first cut of
+> M3's `isa.h` / `simulator.cpp` / `lower.cpp` — and never wrote an entry. This
+> entry documents what that code turned out to *do* once it was run and
+> measured, but the reasoning behind writing it is not recorded anywhere and is
+> not recoverable. Write the log the day the thing happens.
+
+### The headline
+**Qwen2.5-0.5B, compiled to our own ISA and executed on our own simulator,
+produces logits bit-identical to the CPU fp32 path at every position, and
+answers "The capital of France is" with " Paris."** 4461 instructions, 25.24 M
+simulated cycles, 1975.8 MB streamed through an 8 MB scratchpad the compiler
+manages by hand. That is milestone 3's definition of done, on the real model
+rather than a toy.
+
+### It did not start green
+The session opened by running the tests, which is how the honest version of this
+log always starts. Two were red, and both were real bugs, not flaky tests.
+
+**Bug 1 — a write-after-read in the software pipeline.** The prefetch of tile
+t+2 was emitted *before* the MATMUL of tile t, and those two share an SPM bank.
+So the MXU computed on the wrong weights. The failure mode is the nasty one:
+deterministic, silent, no crash, same wrong answer every run — the functional
+simulator executes in program order, so it faithfully reproduced the bug.
+`compiler_parity` caught it as 48 of 48 logits wrong. Fixing it meant emitting
+the MATMUL first (which is what the function's own comment had always described
+— the code and its documentation had disagreed since it was written), and giving
+**every** weight load the `DEP_MXU` anti-dependency, including the prologue
+loads: the banks are at fixed offsets reused by every projection, so a
+projection's first load can otherwise land on top of the previous projection's
+still-running tail matmul. That second half is invisible to the simulator —
+its functional layer runs at issue time, so an anti-dependency violation shows
+up as wrong *timing*, never as wrong *values*. It had to be reasoned out.
+
+**Bug 2 — one ulp, in the bias.** After bug 1 the logits went from garbage to
+almost-right: differing in the last bit. `ops::linear` seeds its **double**
+accumulator with the bias; the compiler was adding the bias afterwards, in
+float, with a `V_ADD`. Two roundings instead of one.
+
+The tempting fix is to loosen the test. The right fix was to notice the ISA was
+under-specified: `kFlagAccumulate` now seeds the MXU accumulator from C *in the
+wide format*, so the machine computes `fp32(bias + Σx·w)` in one rounding, and
+the compiler simply DMAs the bias into the output buffer before the tiles. This
+deleted an instruction per biased projection, and — more importantly — made
+k-split matmuls value-invariant, which is the property `compiler_parity`'s
+four-schedule check actually asserts. A rounding rule that was implicit is now
+written down in `docs/03` §4.3.
+
+**And three wrong hand-counts in `test/sim_isa.cpp`.** The cycle assertions were
+derived by hand when the test was written, and two of them were simply wrong
+arithmetic: one forgot that a 1024-float load is 4096 bytes and not 256, another
+forgot the front end issues one instruction per cycle. The simulator was right
+both times. Worth saying plainly: the tests were wrong, not the code.
+
+### The benchmarks were worse than useless
+The committed `bench/results/*.csv` from last session were taken while a build
+was running. The compute roof came out **45% low** (230 GFLOP/s against 431 on a
+quiet machine) and one GEMM point read 35.9 GOP/s where the identical binary
+does 64.4. Nothing looked wrong — the numbers were plausible and internally
+consistent, which is exactly why this is dangerous. Everything was re-measured
+in one idle-machine pass, now scripted as `bench/run_all.sh` so it is
+reproducible rather than remembered. Lesson for the file: **a benchmark taken on
+a busy machine is worse than no benchmark, because it looks authoritative.**
+
+### What the numbers turned out to say
+- **Decode is memory-bound by ~35×.** 48.9 ms/token INT8, of which the
+  arithmetic accounts for 1.4 ms. Compute is idle 97% of the time.
+- **INT8 bought exactly the bytes it removed and nothing else:** 2.09× fewer
+  bytes, 2.09× faster, and *identical* bandwidth utilisation (19.3 → 19.4 GB/s).
+- **The M2 ≥70%-of-roof gate is missed** — we reach 24.9%. Written up rather
+  than rescoped. The op-count model explains a 20% ceiling and predicted that
+  QK=64 would be ~20% faster; it measured +19.6% on lm_head, which is the
+  strongest evidence the model is right. A tuning sweep then **refuted** the
+  obvious next hypothesis: quadrupling weight reuse (MR 1→4) buys only 8.6%, so
+  the kernel is not weight-bandwidth-bound. The remaining 2× is unattributed and
+  is labelled as such.
+- **On T1, decode is not bandwidth-bound at all** — it is bound by the *shape*
+  of the systolic array. "MAC utilisation 66.4%" looks fine until you compute
+  array **efficiency**: 2.88%, because m=1 uses 1 of 32 rows. The weight stream
+  alone would need 7.7 M cycles; we spend 25.2 M. Since `matmul_cycles` rounds m
+  up to 32, **a batch of 32 tokens would cost the same cycles as a batch of 1**.
+  M3's measurement wrote M4's justification without being asked to.
+- **The planted ISA flaw is worth 27% of the runtime.** Software pipelining
+  takes a decode step from 25.24 M to 18.36 M cycles — but only with fine-grained
+  dependencies. Under the coarse scoreboard the ISA actually specifies, double
+  buffering is worth *exactly zero*: the same cycle count, to the cycle, as not
+  doing it. The optimisation is not degraded, it is annihilated. That table is
+  M7's before/after, sitting ready.
+
+### The gate we lowered, and the flag that made us
+`logit_parity_int8` failed in the ASan tree at 96.9% against a 98% bar, while
+passing at 98.4% in Release. Rather than guess, we built Release with
+`-ffp-contract=off` — and it reproduced the ASan numbers **digit for digit**. So
+the whole spread is FMA contraction in `ops::linear`'s double accumulator, not
+the sanitizer: three near-ties out of 192 land differently. The build with the
+*worse* top-1 has the *better* rel-L2, which is the tell that top-1 over 192
+samples is a noisy metric. The hard gate moved onto perplexity (stable to 0.05
+points) and top-1 dropped to 96% with the reasoning written into the test. It
+still catches the things it should: quantizing the lm_head scores 66%, QK=64
+scores 94.8%.
+
+Also worth recording: the ASan tree earned its keep here by finding a threshold
+that only passed because of an optimisation flag.
+
+### Written this session
+`docs/01-roofline.md`, `docs/02-int8-saturation.md`, `docs/03-isa-spec.md`,
+`docs/04-compiler.md`, `tools/run_sim.cpp` (the full-model gate, which a code
+comment already claimed existed), `src/accel/reference.h` (one CPU reference
+shared by the fast gate and the full-model tool, so they cannot drift), and
+`bench/run_all.sh` + `bench/sim_schedules.sh`.
+
+---
+
 ## 2026-07-24 — Session 2: M1 forward pass runs, model says "Paris"
 
 ### The headline

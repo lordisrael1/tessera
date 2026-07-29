@@ -36,4 +36,13 @@ void gemm_ref(const float* A, const float* B, const float* bias, float* C,
 void linear(const float* X, const float* W, const float* bias, float* Y,
             int64_t M, int64_t IN, int64_t OUT);
 
+// Same maths, AVX2 + threaded (src/ops/linear_f32.cpp). Accumulates in double
+// like linear() does, because on this machine the fp32 path is memory-bound by
+// ~6:1 and the extra precision is therefore free — see the note at the top of
+// that file. Agrees with linear() to ~1e-5 (test_ops asserts it) and is
+// bit-stable across thread counts (each output's whole reduction stays on one
+// thread), which is what lets the M1 oracle stay green with threading on.
+void linear_fast(const float* X, const float* W, const float* bias, float* Y,
+                 int64_t M, int64_t IN, int64_t OUT);
+
 }  // namespace ops
