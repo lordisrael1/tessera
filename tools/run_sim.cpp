@@ -51,9 +51,8 @@ int32_t argmax(const float* v, int64_t n) {
 // that knows HuggingFace tensor names.
 void load_hbm(const SafeTensors& st, const HbmLayout& L, std::vector<float>& hbm) {
     const ModelConfig& cfg = L.cfg;
-    const int64_t H = cfg.hidden_size, HD = cfg.head_dim();
+    const int64_t HD = cfg.head_dim();
     const int64_t QDIM = cfg.num_attention_heads * HD, KVDIM = cfg.num_key_value_heads * HD;
-    const int64_t INTER = cfg.intermediate_size;
 
     auto get = [&](const std::string& name, uint64_t off) {
         st.load_as_f32(name, hbm.data() + off);
@@ -82,7 +81,6 @@ void load_hbm(const SafeTensors& st, const HbmLayout& L, std::vector<float>& hbm
         get(p + "mlp.gate_proj.weight", la.gate_w);
         get(p + "mlp.up_proj.weight", la.up_w);
         get(p + "mlp.down_proj.weight", la.down_w);
-        (void)INTER; (void)H;
     }
     get("model.norm.weight", L.final_ln);
 }
@@ -191,9 +189,13 @@ int main(int argc, char** argv) {
     for (int64_t pos = 0; pos < nsteps && pos < max_seq; ++pos) {
         // The host writes the token embedding; that is the ONE thing the chip
         // does not do for itself (an embedding lookup is a gather, not a matmul).
-        const int32_t id = (pos < static_cast<int64_t>(ids.size()))
-                               ? ids[static_cast<size_t>(pos)]
-                               : argmax(want.data(), cfg.vocab_size);
+        // Generated tokens come from the SIMULATOR's logits, not the reference's.
+        // They are asserted identical every step, but the demo should be the
+        // chip's output — if they ever diverge, the text must show it.
+        const int32_t id =
+            (pos < static_cast<int64_t>(ids.size()))
+                ? ids[static_cast<size_t>(pos)]
+                : argmax(sim.hbm().data() + L.act_out, cfg.vocab_size);
         if (pos >= static_cast<int64_t>(ids.size())) generated += tok.decode({id});
         for (int64_t i = 0; i < cfg.hidden_size; ++i)
             sim.hbm()[static_cast<size_t>(L.act_in + i)] =
@@ -320,7 +322,8 @@ int main(int argc, char** argv) {
     const T1Config& c = t1;
     const double array_eff = total.mxu_busy
         ? static_cast<double>(total.macs) / (static_cast<double>(total.mxu_busy) * 1024.0) : 0.0;
-    const int64_t dma_floor = total.dma_bytes / c.dma_bytes_per_cycle;
+    const int64_t dma_floor = std::max<int64_t>(1, total.dma_bytes / c.dma_bytes_per_cycle);
+    if (tot_cycles == 0) return total_mismatch == 0 ? 0 : 1;
     std::printf("\n  array occupancy      %.1f%% of cycles the MXU was busy\n"
                 "  array EFFICIENCY     %.2f%% of the MACs it could have retired while busy\n"
                 "  -> m=1 uses %.0f of %lld rows: decode is limited by the SHAPE of the array,\n"

@@ -34,6 +34,12 @@ Last updated: 2026-07-29
 - `ctest` **8/8 in Release**, **8/8 in the ASan+UBSan tree**, zero warnings at
   `-Wall -Wextra -Wshadow -Wconversion`.
 - `tools/run_sim` on the real model: M3 gate passes at every position.
+- **ThreadSanitizer clean** on `test_gemm`, which is the only test that drives
+  the thread pool (it sweeps MR × panel-block × prefetch × {1, all} threads).
+  ASan does not detect races, so without this the pool was unverified.
+  **Gotcha:** TSan aborts on this kernel with "unexpected memory mapping" —
+  ASLR entropy. Run it as
+  `setarch $(uname -m) -R ./build/tsan/test/test_gemm`.
 
 ## What this session did
 
@@ -54,12 +60,19 @@ Last updated: 2026-07-29
 2. **Fixed three wrong hand-counts in `test/sim_isa.cpp`.** The simulator was
    right and the test's arithmetic was wrong (it forgot the DMA's byte count in
    one case and the one-instruction-per-cycle front end in another).
-3. **Re-measured every benchmark.** The committed CSVs had been taken on a busy
+3. **Audited the dependency masks with the tests already green**, and found a
+   third latent bug of the same family: `kcur`/`vcur`/`logits` are read by a
+   `DMA_STORE`, but the next write to them never waited on `DEP_DMA_OUT`. Only
+   the schedule (a whole attention block separates them) was keeping it correct.
+   Declaring the dependency properly cost **zero cycles**. Also made the
+   simulator stop reporting a misaligned SPM address as "out of range" — a
+   different bug with a different cause — and added a test for it.
+4. **Re-measured every benchmark.** The committed CSVs had been taken on a busy
    machine and were **45% low** on the compute roof. Everything was re-run in
    one quiet-machine pass (`bench/run_all.sh`).
-4. **Wrote `tools/run_sim`** — the full-model M3 gate, which did not exist
+5. **Wrote `tools/run_sim`** — the full-model M3 gate, which did not exist
    although a code comment claimed it did.
-5. **Wrote the four milestone docs** (`docs/01`..`04`).
+6. **Wrote the four milestone docs** (`docs/01`..`04`).
 
 ## The one deliberately-lowered gate, and why
 

@@ -99,6 +99,17 @@ int64_t Simulator::vpu_cycles(int64_t elems, int64_t fixed) const {
     return fixed + (elems + cfg_.vpu_lanes - 1) / cfg_.vpu_lanes;
 }
 
+// Why an SPM operand was rejected. Under stance 2 the compiler owns placement,
+// so this error class IS how a compiler bug surfaces — and "out of range" when
+// the real problem is a misaligned offset sends you hunting the wrong bug. The
+// two failures have completely different causes (a bad size calculation vs a
+// byte/float unit mix-up), so they get different messages.
+const char* Simulator::spm_fault(uint32_t byte_off, int64_t elems) const {
+    if (byte_off % 4 != 0) return "SPM address is not 4-byte aligned";
+    if (elems < 0) return "SPM operand has negative length";
+    return "SPM address out of range";
+}
+
 float* Simulator::spm_at(uint32_t byte_off, int64_t elems) {
     if (byte_off % 4 != 0) return nullptr;
     int64_t idx = byte_off / 4;
@@ -143,7 +154,7 @@ bool Simulator::exec_functional(const Instr& in, int64_t index) {
             int64_t rows = in.arg[3], cols = in.arg[4], row_stride = in.arg[5];
             if (rows <= 0 || cols <= 0) return fail("non-positive rows/cols");
             float* s = spm_at(spm_off, rows * cols);
-            if (!s) return fail("SPM address out of range");
+            if (!s) return fail(spm_fault(spm_off, rows * cols));
             if (hbm_off + static_cast<uint64_t>((rows - 1) * row_stride + cols) > hbm_.size())
                 return fail("HBM address out of range");
 
@@ -168,7 +179,9 @@ bool Simulator::exec_functional(const Instr& in, int64_t index) {
             const float* A = spm_at_c(a_off, m * k);
             const float* B = spm_at_c(b_off, n * k);  // same element count either way
             float* C = spm_at(c_off, m * n);
-            if (!A || !B || !C) return fail("SPM address out of range");
+            if (!A) return fail(spm_fault(a_off, m * k));
+            if (!B) return fail(spm_fault(b_off, n * k));
+            if (!C) return fail(spm_fault(c_off, m * n));
 
             const bool acc = (in.flags & kFlagAccumulate) != 0;
             const bool b_kn = (in.flags & kFlagBIsKN) != 0;
@@ -201,7 +214,9 @@ bool Simulator::exec_functional(const Instr& in, int64_t index) {
             const float* x = spm_at_c(src, len);
             const float* g = spm_at_c(w, len);
             float* y = spm_at(dst, len);
-            if (!x || !g || !y) return fail("SPM address out of range");
+            if (!x) return fail(spm_fault(src, len));
+            if (!g) return fail(spm_fault(w, len));
+            if (!y) return fail(spm_fault(dst, len));
             double sumsq = 0.0;  // double, exactly as ops::rmsnorm does
             for (int64_t i = 0; i < len; ++i) sumsq += static_cast<double>(x[i]) * x[i];
             float inv = static_cast<float>(
@@ -214,7 +229,7 @@ bool Simulator::exec_functional(const Instr& in, int64_t index) {
             uint32_t src = in.arg[0];
             int64_t len = in.arg[1];
             float* x = spm_at(src, len);
-            if (!x) return fail("SPM address out of range");
+            if (!x) return fail(spm_fault(src, len));
             if (len <= 0) return true;
             float mx = x[0];
             for (int64_t i = 1; i < len; ++i) mx = std::max(mx, x[i]);
@@ -233,7 +248,7 @@ bool Simulator::exec_functional(const Instr& in, int64_t index) {
             uint32_t src = in.arg[0];
             int64_t head_dim = in.arg[1], pos = in.arg[2], heads = in.arg[3];
             float* x = spm_at(src, head_dim * heads);
-            if (!x) return fail("SPM address out of range");
+            if (!x) return fail(spm_fault(src, head_dim * heads));
             for (int64_t h = 0; h < heads; ++h) {
                 float* v = x + h * head_dim;
                 int64_t half = head_dim / 2;
@@ -261,7 +276,9 @@ bool Simulator::exec_functional(const Instr& in, int64_t index) {
             const float* gp = spm_at_c(g, len);
             const float* up = spm_at_c(u, len);
             float* dp = spm_at(d, len);
-            if (!gp || !up || !dp) return fail("SPM address out of range");
+            if (!gp) return fail(spm_fault(g, len));
+            if (!up) return fail(spm_fault(u, len));
+            if (!dp) return fail(spm_fault(d, len));
             for (int64_t i = 0; i < len; ++i) {
                 float x = gp[i];
                 dp[i] = (x / (1.0f + std::exp(-x))) * up[i];
@@ -276,7 +293,8 @@ bool Simulator::exec_functional(const Instr& in, int64_t index) {
             int64_t len = in.arg[2];
             const float* sp = spm_at_c(s, len);
             float* dp = spm_at(d, len);
-            if (!sp || !dp) return fail("SPM address out of range");
+            if (!sp) return fail(spm_fault(s, len));
+            if (!dp) return fail(spm_fault(d, len));
             for (int64_t i = 0; i < len; ++i) {
                 if (in.op == Op::V_ADD) dp[i] += sp[i];
                 else if (in.op == Op::V_COPY) dp[i] = sp[i];

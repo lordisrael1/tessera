@@ -119,6 +119,77 @@ comment already claimed existed), `src/accel/reference.h` (one CPU reference
 shared by the fast gate and the full-model tool, so they cannot drift), and
 `bench/run_all.sh` + `bench/sim_schedules.sh`.
 
+### Then an audit pass, with the tests already green
+Green tests are the *start* of a review, not the end of one. Reading the
+dependency masks against the emitted program turned up a third latent bug of the
+same family as the first two:
+
+**`kcur`, `vcur` and `logits` are read by a `DMA_STORE`, and the next thing to
+write them waited only on `DEP_MXU | DEP_VPU` — never on `DEP_DMA_OUT`.** The
+next layer's `k_proj` writes the same buffer the previous layer streamed to HBM.
+Today the gap is a whole attention block plus an FFN, so it cannot bite; the
+declared dependency did not cover it, which means only the schedule was keeping
+it correct. Declaring it properly measured **zero extra cycles** (25,242,004
+before and after, to the cycle) because the store has always long since retired
+— the correct dependency was free, and only luck was making the wrong one work.
+Stance 2 says the compiler owns placement; owning it means declaring it, not
+observing that it happens to work.
+
+Also fixed: **the simulator reported a misaligned SPM address as "out of
+range"**, which is the wrong bug — a bad size calculation and a byte/float unit
+mix-up have nothing to do with each other, and the ISA doc promises this error
+class is loud *and* accurate because it is how a compiler bug surfaces. Each
+operand now reports its own reason, with a test for the misalignment path.
+
+**And we finally pointed ThreadSanitizer at the thread pool.** ASan does not
+detect races, so every INT8 path had been running six threads with no race
+checking at all. TSan on `test_gemm` (which sweeps MR × panel-block × prefetch ×
+{1, all} threads) is **clean**. Worth writing down because it cost ten minutes:
+TSan aborts immediately on this kernel with "unexpected memory mapping" — that
+is ASLR entropy, not a bug in the code. `setarch $(uname -m) -R` fixes it.
+
+And three numbers in the docs did not survive being checked against a fresh run
+(per-layer array efficiency 2.87 → 2.84%, tile range 4–9 → 2–8, two rows of the
+STREAM table mistranscribed). All corrected. Writing a number down is not the
+same as measuring it, which is the same lesson as the busy-machine benchmarks,
+one level up.
+
+### What is REAL vs what is still FAKE
+
+**Real, measured, and gated by a test that runs:**
+- The fp32 forward pass. `logit_parity` holds it to 1.98e-05 against HuggingFace
+  with 64/64 greedy tokens exact, and the bisection ladder agrees at every tap.
+- The INT8 path: kernel, quantization, packing, threading. `test_gemm` asserts
+  every kernel generation is bit-identical (21,501 checks), the saturation bound
+  is proven *and* measured, and `logit_parity_int8` gates quality end to end.
+- The T1 simulator and compiler. The real 0.5B, lowered and executed, is
+  bit-identical to the CPU at every position — checked by two independent gates
+  sharing one reference.
+- Every number in `docs/01`–`04`. Re-measured on a quiet machine this session,
+  raw output committed, and the ones that disagreed with a fresh run were fixed
+  rather than kept.
+
+**Real but narrower than it sounds:**
+- "The model runs on the accelerator" means **decode, batch 1, fp32, one tile,
+  no interconnect**. Prefill is not lowered. There is no INT8 datapath on T1.
+- `run_sim` is checked against our own CPU path, not against HuggingFace. The
+  chain to HF runs through `logit_parity`, which covers the same ops — but the
+  T1 path is not *directly* anchored to an external oracle.
+- The per-layer stall split charges a mixed dependency+structural stall entirely
+  to the dependency class. The aggregate counters split them properly; the
+  per-layer view is an approximation.
+
+**Still fake or absent, and named so nobody trips over it:**
+- **No llama.cpp comparison.** Until it exists, "our INT8 GEMM" has no external
+  reference point, and the 24.9%-of-roof number cannot be put in context.
+- **The last 2× in the micro-kernel is unexplained.** Not "probably X" —
+  unattributed. The MR sweep already killed the obvious hypothesis.
+- **The tokenizer pretokenizer is still the documented approximation** (exact
+  for ASCII, tested against an HF dump).
+- **M4–M7 do not exist.** `FaultConfig` and the trace buffer are wired in as
+  hooks with no consumer; they are scaffolding, deliberately, and they are not
+  evidence of a runtime or a profiler.
+
 ---
 
 ## 2026-07-24 — Session 2: M1 forward pass runs, model says "Paris"

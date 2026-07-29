@@ -172,7 +172,7 @@ The per-layer report (`tools/run_sim`) for one decode step:
 | region | instrs | cycles | MXU busy | array eff. | DMA MB | stall DMA | stall MXU |
 |---|--:|--:|--:|--:|--:|--:|--:|
 | prologue + lm_head | 525 | 6,673,108 | 66.5% | 3.00% | 545.2 | 33.5% | 66.5% |
-| each of 24 layers | 164 | 773,704 | 66.3% | 2.87% | 59.7 | 33.5% | 66.5% |
+| each of 24 layers | 164 | 773,704 | 66.3% | 2.84% | 59.7 | 33.6% | 66.3% |
 | **total** | **4461** | **25,242,004** | 66.4% | **2.88%** | 1975.8 | | |
 
 The layers are identical to the cycle, which is the expected shape of a program
@@ -219,8 +219,8 @@ Two gates, deliberately different in cost:
 
 - **`test/compiler_parity.cpp`** — a tiny synthetic model (hidden 64, 2 layers,
   GQA with `q_per_kv = 2`, QKV biases, SwiGLU, tied output projection) with the
-  bank budget shrunk to 4 KB so even that model needs 4–9 tiles per projection.
-  Runs in 60 ms, so it gates every commit, and it asserts bit-exactness at five
+  bank budget shrunk to 4 KB so even that model needs 2–8 tiles per projection.
+  Runs in ~40 ms, so it gates every commit, and it asserts bit-exactness at five
   positions plus identical logits across all four schedules. A gate you skip is
   not a gate.
 - **`tools/run_sim`** — the real 0.5B, 2 GB HBM image, ~0.5 s of simulation per

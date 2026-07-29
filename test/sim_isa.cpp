@@ -10,6 +10,7 @@
 // ============================================================================
 #include <cmath>
 #include <cstdio>
+#include <string>
 #include <vector>
 
 #include "../src/accel/isa.h"
@@ -246,13 +247,27 @@ static void test_matmul_orientations() {
 //    compiler bug produces and it has to be loud.
 static void test_bad_address_is_caught() {
     std::vector<float> hbm(64, 0.0f);
-    Simulator sim(cfg(), hbm);
-    Program p;
-    p.emit(load(0, 0xFFFFFF00u, 1, 64, 64), "load past the end of SPM");
-    p.emit(halt(), "halt");
-    CHECK(sim.run(p) == SimStatus::BAD_PROGRAM);
-    CHECK(!sim.error().empty());
-    std::printf("  [guard] %s\n", sim.error().c_str());
+    {
+        Simulator sim(cfg(), hbm);
+        Program p;
+        p.emit(load(0, 0xFFFFFF00u, 1, 64, 64), "load past the end of SPM");
+        p.emit(halt(), "halt");
+        CHECK(sim.run(p) == SimStatus::BAD_PROGRAM);
+        CHECK(sim.error().find("out of range") != std::string::npos);
+        std::printf("  [guard] %s\n", sim.error().c_str());
+    }
+    // A MISALIGNED address is a different bug with a different cause (a byte/
+    // float unit mix-up, not a bad size), so it must not be reported as "out of
+    // range" — that sends you hunting the wrong thing.
+    {
+        Simulator sim(cfg(), hbm);
+        Program p;
+        p.emit(load(0, 2u, 1, 64, 64), "load to an odd SPM offset");
+        p.emit(halt(), "halt");
+        CHECK(sim.run(p) == SimStatus::BAD_PROGRAM);
+        CHECK(sim.error().find("not 4-byte aligned") != std::string::npos);
+        std::printf("  [guard] %s\n", sim.error().c_str());
+    }
 }
 
 // 7) A DMA that never completes must hit the deadline rather than hang. M4's

@@ -127,6 +127,8 @@ private:
     int64_t vpu_cycles(int64_t elems, int64_t fixed) const;
 
     bool exec_functional(const Instr& in, int64_t index);
+    // Why spm_at/spm_at_c rejected an operand, as a message naming the cause.
+    const char* spm_fault(uint32_t byte_off, int64_t elems) const;
     float* spm_at(uint32_t byte_off, int64_t elems);
     const float* spm_at_c(uint32_t byte_off, int64_t elems) const;
 

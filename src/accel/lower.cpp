@@ -226,11 +226,26 @@ static void lower_projection(Emitter& E, SpmAllocator& spm, uint64_t w_hbm,
     // obvious alternative (matmul, then a V_ADD of the bias) rounds twice and
     // disagrees with the CPU in the last ulp, which is precisely the class of
     // "close enough" that compiler_parity refuses.
+    // THE FIRST WRITE TO Y IS THE DANGEROUS ONE. Y may still be being READ by an
+    // outbound DMA issued earlier: k_proj and v_proj write the same kcur/vcur
+    // buffers that the previous layer's "store K/V" streamed to HBM, and lm_head
+    // writes the logits buffer that the previous step's "store logits" read. So
+    // the first write of every projection waits on DEP_DMA_OUT as well as on the
+    // MXU and VPU that produced Y's previous contents.
+    //
+    // In this model the gap happens to be enormous — a whole attention block and
+    // FFN separate the store from the next writer — so nothing would break
+    // today. That is exactly why it has to be a declared dependency rather than
+    // a lucky schedule: the simulator executes functionally at ISSUE time, so an
+    // anti-dependency violation is invisible to it (wrong timing, never wrong
+    // values), and the next scheduling pass that hoists anything would turn this
+    // from latent to silent-wrong. Stance 2 says the compiler owns placement;
+    // owning it means declaring it.
+    const uint16_t kFirstWriteDeps = static_cast<uint16_t>(DEP_MXU | DEP_VPU | DEP_DMA_OUT);
+
     if (has_bias) {
         Instr ld = dma_load(bias_hbm, y_spm, 1, OUT, OUT, 0);
-        // Must not land while a previous projection's matmul is still writing
-        // its output, and must not be overtaken by the tile loads behind it.
-        ld.dep_mask = static_cast<uint16_t>(DEP_MXU | DEP_VPU);
+        ld.dep_mask = kFirstWriteDeps;
         E.emit(ld, std::string(what) + " bias load -> Y");
     }
 
@@ -277,6 +292,10 @@ static void lower_projection(Emitter& E, SpmAllocator& spm, uint64_t w_hbm,
         // and in-order issue already order it ahead of every tile load; saying so
         // explicitly costs nothing here and survives a future second DMA engine.
         if (has_bias) mm.dep_mask = static_cast<uint16_t>(mm.dep_mask | DEP_DMA_IN);
+        // Without a bias, tile 0's matmul IS the first write to Y — see
+        // kFirstWriteDeps above. Later tiles write disjoint slices and are
+        // ordered behind tile 0, so gating the first one is sufficient.
+        if (!has_bias && t == 0) mm.dep_mask = static_cast<uint16_t>(mm.dep_mask | kFirstWriteDeps);
         E.emit(mm, std::string(what) + " matmul tile " + std::to_string(t));
     };
 
