@@ -55,7 +55,7 @@ struct HbmLayout {
     uint64_t final_ln = 0;    // [hidden]
     std::vector<LayerAddrs> layers;
     uint64_t kv_k = 0, kv_v = 0;   // [layers, max_seq, kv_dim]
-    uint64_t act_in = 0;      // [hidden]  the token's embedding, written by host
+    uint64_t act_in = 0;      // [max_seq, hidden] token embeddings, written by host
     uint64_t act_out = 0;     // [vocab]   logits, written back by the program
     uint64_t total_floats = 0;
     int64_t max_seq = 0;
@@ -107,5 +107,29 @@ struct LowerReport {
 // the KV cache holds positions [0, pos).
 Program lower_decode_step(const HbmLayout& layout, int64_t pos, const LowerOptions& opt,
                           LowerReport* report = nullptr);
+
+// Compile a PREFILL CHUNK: `ntokens` tokens starting at absolute position
+// `base`, whose embeddings the host has written to layout.act_in.
+//
+// WHY THIS IS THE WHOLE POINT. `matmul_cycles` rounds m up to the array
+// dimension, so a projection tile costs the SAME cycles at m=32 as at m=1 —
+// the systolic array is 32 rows wide and decode feeds it one. Prefilling 32
+// tokens together therefore does 32x the work for approximately the cost of one
+// decode step, and takes the array from ~2.9% efficiency to ~90%. That is not a
+// tuning result, it is the shape of the hardware, and it is why every serving
+// system batches.
+//
+// Only the LAST token's logits are written to layout.act_out; the point of
+// prefill is the KV cache.
+//
+// CHUNKED, NOT WHOLE-PROMPT. The activation working set scales with ntokens
+// (~81 KB per token for Qwen2.5-0.5B) against a fixed 8 MB scratchpad, so the
+// chunk is bounded by SPM, not by the model. See max_prefill_tokens().
+Program lower_prefill(const HbmLayout& layout, int64_t base, int64_t ntokens,
+                      const LowerOptions& opt, LowerReport* report = nullptr);
+
+// Largest chunk that fits `opt`'s scratchpad budget, from the same arithmetic
+// the allocator uses. Returns at least 1.
+int64_t max_prefill_tokens(const HbmLayout& layout, const LowerOptions& opt);
 
 }  // namespace accel

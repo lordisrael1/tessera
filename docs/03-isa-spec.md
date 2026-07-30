@@ -195,15 +195,44 @@ anyway.
 
 ### 4.2 The vector ops
 
-| op | arg0 | arg1 | arg2 | arg3 | imm_f |
-|---|---|---|---|---|---|
-| `V_RMSNORM` | src | weight | dst | len | eps |
-| `V_SOFTMAX` | src (in place) | len | — | — | — |
-| `V_ROPE` | src (in place) | head_dim | pos | heads | theta |
-| `V_SILU_MUL` | gate | up | dst | len | — |
-| `V_ADD` | src | dst (`dst += src`) | len | — | — |
-| `V_COPY` | src | dst | len | — | — |
-| `V_SCALE` | src | dst | len | — | factor |
+| op | arg0 | arg1 | arg2 | arg3 | arg4 | arg5 | imm_f |
+|---|---|---|---|---|---|---|---|
+| `V_RMSNORM` | src | weight | dst | len | rows | row_stride | eps |
+| `V_SOFTMAX` | src (in place) | first_len | rows | row_stride | — | — | — |
+| `V_ROPE` | src (in place) | head_dim | pos | heads | rows | row_stride | theta |
+| `V_SILU_MUL` | gate | up | dst | len | — | — | — |
+| `V_ADD` | src | dst (`dst += src`) | len | — | — | — | — |
+| `V_COPY` | src | dst | cols | rows | src_stride | dst_stride | — |
+| `V_SCALE` | src | dst | len | — | — | — | factor |
+
+**`rows` and the strides are optional and encode "1" as 0.** A zero row count
+means one row; a zero stride defaults to the length. That is not a convenience —
+it is what let prefill be added without changing a single byte of the decode
+programs, and it is why adding the row dimension perturbed exactly zero cycles
+of the decode measurements in `docs/04`.
+
+Three of these are *per-row* ops, and the row is always a token:
+
+- **`V_RMSNORM`** performs `rows` independent normalisations, each over `len`
+  contiguous elements, sharing one weight vector. A transformer normalises per
+  token and never across tokens, so this is the only shape it ever needs.
+- **`V_ROPE`** treats row `r` as the token at absolute position `pos + r`, and
+  steps the angle itself. Decode passes `rows = 1` and gets the old behaviour.
+- **`V_SOFTMAX` is CAUSAL BY CONSTRUCTION.** Row `r` covers `first_len + r`
+  elements (clamped to the stride) and **everything past that in the row is set
+  to zero**. Zeroing rather than ignoring is the entire trick: the AV matmul
+  that consumes the score block reads the full `[rows, stride]` rectangle, so the
+  mask has to live in the data. One instruction therefore does what would
+  otherwise be a softmax *and* a mask-fill per query row — for a 32-token chunk
+  with 14 heads across 24 layers, that is 21,504 instructions replaced by 336.
+
+`V_COPY` is a **2-D strided move**, the on-chip counterpart of the DMA's 2-D
+descriptor. It exists because MATMUL writes a tile packed as `[m, n]` while the
+activation it belongs to is a *column slice* of a wider `[m, OUT]` block; giving
+the VPU a strided move is cheaper in hardware than giving the systolic array's
+writeback port an output stride. It is also what packs one attention head's `Q`
+out of the interleaved `[M, QDIM]` block so the MXU's `A` operand has the row
+stride the ISA requires.
 
 The arithmetic is specified to the last bit, because bit-exactness against the
 CPU path is the M3 gate:
@@ -388,8 +417,9 @@ place.
 
 Stated plainly, so nobody has to discover them by reading the source:
 
-- **No prefill programs.** Only `lower_decode_step` exists; `m` is always 1. The
-  ISA supports `m > 1` and the simulator times it, but nothing emits it yet.
+- **No whole-prompt prefill.** `lower_prefill` exists and `m > 1` works, but a
+  chunk is bounded by the scratchpad (42 tokens for Qwen2.5-0.5B in 8 MB), so a
+  long prompt is several chunks rather than one program. See `docs/04` §7.
 - **No INT8 datapath.** T1 is fp32 end to end. The M2 measurements say an INT8
   array would be the single biggest win available, and the extrapolated
   `vpdpbusd` number in `docs/01` sizes it — but bit-exactness against the fp32

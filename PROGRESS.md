@@ -4,7 +4,7 @@
 This file is the single source of truth for "where are we and what's next."
 Keep it updated at the end of every work session.
 
-Last updated: 2026-07-29
+Last updated: 2026-07-30
 
 ---
 
@@ -22,14 +22,18 @@ Last updated: 2026-07-29
   ≥70% the bible asks for.** Fully decomposed in `docs/01-roofline.md` — it is
   not hand-waved and it is not quietly rescoped. Everything else in M2 is done,
   except the llama.cpp honesty benchmark, which has not been run.
-- **M3 (ISA + simulator + compiler): DONE.** The real Qwen2.5-0.5B, lowered to
-  the T1 ISA and run on the simulator, is **bit-identical to the CPU fp32 path
-  at every position** and generates " Paris." Per-layer cycles / DMA-stall /
-  MAC-utilisation are reported. ISA spec and compiler docs written.
+- **M3 (ISA + simulator + compiler): DONE, including prefill.** The real
+  Qwen2.5-0.5B, lowered to the T1 ISA and run on the simulator, is
+  **bit-identical to the CPU fp32 path at every position** and generates
+  " Paris." Per-layer cycles / DMA-stall / MAC-utilisation are reported.
+  **`lower_prefill` (m > 1) lands the 32× the timing model predicted:** 32
+  tokens as one chunk cost **25.5 M cycles against 808 M** for 32 decode steps
+  (31.7×), with array efficiency **2.88% → 67.8%** and the last token's logits
+  bit-identical to the decode path. ISA spec and compiler docs written.
 
 **Per the charter: apply to jobs now.** M3 was the bar.
 
-## Verified green (2026-07-29)
+## Verified green (2026-07-30)
 
 - `ctest` **8/8 in Release**, **8/8 in the ASan+UBSan tree**, zero warnings at
   `-Wall -Wextra -Wshadow -Wconversion`.
@@ -73,6 +77,13 @@ Last updated: 2026-07-29
 5. **Wrote `tools/run_sim`** — the full-model M3 gate, which did not exist
    although a code comment claimed it did.
 6. **Wrote the four milestone docs** (`docs/01`..`04`).
+7. **Implemented prefill (`m > 1`)** — the 32× that §4 of `docs/04` predicted
+   from the timing model, now measured: 31.7×, bit-exact. Required a row
+   dimension on the vector ops (V_RMSNORM/V_ROPE/V_SOFTMAX/V_COPY, all encoding
+   "one row" as 0 so no decode program changed by a byte), a causal V_SOFTMAX
+   that zeroes past each row's boundary, a 2-D strided V_COPY to place packed
+   matmul tiles into wider activation blocks, and a row_stride=0 DMA to
+   broadcast biases. `max_prefill_tokens()` reports the scratchpad's limit: 42.
 
 ## The one deliberately-lowered gate, and why
 
@@ -104,6 +115,9 @@ and QK=64 scores 94.8% — both fail it.
 | T1 decode step | 4461 instrs, 25.24 M cycles, 1975.8 MB streamed |
 | T1 array occupancy / efficiency | 66.4% / **2.88%** (m=1 uses 1 of 32 rows) |
 | T1 double buffering | −27.3% cycles **with fine deps, 0% with the coarse ones** |
+| T1 prefill, 32 tokens | 25.5 M cycles vs 808 M for 32 decode steps = **31.7×** |
+| T1 array efficiency, prefill | **67.8%** (the residual is the m=1 lm_head, by design) |
+| T1 max prefill chunk | **42 tokens** — bounded by the 8 MB scratchpad, not the model |
 | activation high-water | 79.2 KB/token (sizes the 8 MB scratchpad) |
 | SPM high-water, real model | 4.89 MB of 8 MB |
 
@@ -114,11 +128,12 @@ and QK=64 scores 94.8% — both fail it.
   predicts ~140 GOP/s/core; we measure 66.8. Next experiment: `perf stat` on
   uops-per-port. The MR sweep already **refuted** the obvious hypothesis
   (weight-bandwidth: 4× the reuse buys 8.6%).
-- **Prefill programs for T1.** `lower_decode_step` only, `m` always 1. §4 of
-  `docs/04` argues this is where the performance is: `matmul_cycles` rounds m up
-  to 32, so **32 tokens would cost the same cycles as 1**.
-- **M4 onwards.** Continuous batching is the obvious next thing and M3's
-  measurement is its justification.
+- **Whole-prompt prefill.** Chunks cap at 42 tokens on this scratchpad, so a
+  long prompt is several programs. Composing them is the caller's job today.
+- **Batching across REQUESTS.** `lower_prefill` batches tokens of one sequence;
+  many sequences at different positions sharing one matmul is M4, and the 31.7×
+  in `docs/04` §5 is its justification.
+- **M4 onwards.** Continuous batching is the obvious next thing.
 
 ## How to build and run
 

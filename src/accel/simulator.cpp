@@ -99,6 +99,25 @@ int64_t Simulator::vpu_cycles(int64_t elems, int64_t fixed) const {
     return fixed + (elems + cfg_.vpu_lanes - 1) / cfg_.vpu_lanes;
 }
 
+// The two fields every vector op grew when prefill arrived. Encoding "one row"
+// as 0 is what keeps every decode program written before them byte-identical —
+// see the note in isa.h.
+static inline int64_t vrows(uint32_t encoded) {
+    return encoded ? static_cast<int64_t>(encoded) : 1;
+}
+static inline int64_t vstride(uint32_t encoded, int64_t dflt) {
+    return encoded ? static_cast<int64_t>(encoded) : dflt;
+}
+
+// Elements a causal V_SOFTMAX actually touches: row r covers first_len + r,
+// clamped to the row stride. Used by both the timing model and nothing else —
+// the functional path recomputes it per row.
+static inline int64_t softmax_elems(int64_t first_len, int64_t rows, int64_t stride) {
+    int64_t total = 0;
+    for (int64_t r = 0; r < rows; ++r) total += std::min(first_len + r, stride);
+    return total;
+}
+
 // Why an SPM operand was rejected. Under stance 2 the compiler owns placement,
 // so this error class IS how a compiler bug surfaces — and "out of range" when
 // the real problem is a misaligned offset sends you hunting the wrong bug. The
@@ -209,48 +228,75 @@ bool Simulator::exec_functional(const Instr& in, int64_t index) {
         }
 
         case Op::V_RMSNORM: {
+            // One independent normalisation per row; the weight vector is shared
+            // across rows, which is what makes this one instruction instead of M.
             uint32_t src = in.arg[0], w = in.arg[1], dst = in.arg[2];
             int64_t len = in.arg[3];
-            const float* x = spm_at_c(src, len);
+            int64_t rows = vrows(in.arg[4]);
+            int64_t stride = vstride(in.arg[5], len);
+            if (len <= 0 || stride < len) return fail("bad rmsnorm len/stride");
+            const float* x = spm_at_c(src, (rows - 1) * stride + len);
             const float* g = spm_at_c(w, len);
-            float* y = spm_at(dst, len);
-            if (!x) return fail(spm_fault(src, len));
+            float* y = spm_at(dst, (rows - 1) * stride + len);
+            if (!x) return fail(spm_fault(src, (rows - 1) * stride + len));
             if (!g) return fail(spm_fault(w, len));
-            if (!y) return fail(spm_fault(dst, len));
-            double sumsq = 0.0;  // double, exactly as ops::rmsnorm does
-            for (int64_t i = 0; i < len; ++i) sumsq += static_cast<double>(x[i]) * x[i];
-            float inv = static_cast<float>(
-                1.0 / std::sqrt(sumsq / static_cast<double>(len) + in.imm_f));
-            for (int64_t i = 0; i < len; ++i) y[i] = x[i] * inv * g[i];
+            if (!y) return fail(spm_fault(dst, (rows - 1) * stride + len));
+            for (int64_t r = 0; r < rows; ++r) {
+                const float* xr = x + r * stride;
+                float* yr = y + r * stride;
+                double sumsq = 0.0;  // double, exactly as ops::rmsnorm does
+                for (int64_t i = 0; i < len; ++i) sumsq += static_cast<double>(xr[i]) * xr[i];
+                float inv = static_cast<float>(
+                    1.0 / std::sqrt(sumsq / static_cast<double>(len) + in.imm_f));
+                for (int64_t i = 0; i < len; ++i) yr[i] = xr[i] * inv * g[i];
+            }
             return true;
         }
 
         case Op::V_SOFTMAX: {
+            // CAUSAL BY CONSTRUCTION. Row r covers `first_len + r` elements and
+            // everything past that in the row is ZEROED. Zeroing rather than
+            // ignoring is the point: the attention AV matmul that consumes this
+            // block reads the full [rows, stride] rectangle, so the mask has to
+            // live in the data. This is what lets one instruction do what would
+            // otherwise be a softmax and a mask-fill per query row.
             uint32_t src = in.arg[0];
-            int64_t len = in.arg[1];
-            float* x = spm_at(src, len);
-            if (!x) return fail(spm_fault(src, len));
-            if (len <= 0) return true;
-            float mx = x[0];
-            for (int64_t i = 1; i < len; ++i) mx = std::max(mx, x[i]);
-            double sum = 0.0;
-            for (int64_t i = 0; i < len; ++i) {
-                float e = std::exp(x[i] - mx);
-                x[i] = e;
-                sum += e;
+            int64_t first_len = in.arg[1];
+            int64_t rows = vrows(in.arg[2]);
+            int64_t stride = vstride(in.arg[3], first_len);
+            if (first_len <= 0) return true;
+            float* x = spm_at(src, (rows - 1) * stride + std::min(first_len, stride));
+            if (!x) return fail(spm_fault(src, rows * stride));
+            for (int64_t r = 0; r < rows; ++r) {
+                float* row = x + r * stride;
+                const int64_t n = std::min(first_len + r, stride);
+                float mx = row[0];
+                for (int64_t i = 1; i < n; ++i) mx = std::max(mx, row[i]);
+                double sum = 0.0;
+                for (int64_t i = 0; i < n; ++i) {
+                    float e = std::exp(row[i] - mx);
+                    row[i] = e;
+                    sum += e;
+                }
+                float inv = static_cast<float>(1.0 / sum);
+                for (int64_t i = 0; i < n; ++i) row[i] *= inv;
+                for (int64_t i = n; i < stride; ++i) row[i] = 0.0f;  // the mask
             }
-            float inv = static_cast<float>(1.0 / sum);
-            for (int64_t i = 0; i < len; ++i) x[i] *= inv;
             return true;
         }
 
         case Op::V_ROPE: {
+            // Row r is the token at absolute position `pos + r`. One instruction
+            // rotates a whole [rows, heads*head_dim] activation block.
             uint32_t src = in.arg[0];
             int64_t head_dim = in.arg[1], pos = in.arg[2], heads = in.arg[3];
-            float* x = spm_at(src, head_dim * heads);
-            if (!x) return fail(spm_fault(src, head_dim * heads));
+            int64_t rows = vrows(in.arg[4]);
+            int64_t stride = vstride(in.arg[5], head_dim * heads);
+            float* base = spm_at(src, (rows - 1) * stride + head_dim * heads);
+            if (!base) return fail(spm_fault(src, (rows - 1) * stride + head_dim * heads));
+            for (int64_t r = 0; r < rows; ++r)
             for (int64_t h = 0; h < heads; ++h) {
-                float* v = x + h * head_dim;
+                float* v = base + r * stride + h * head_dim;
                 int64_t half = head_dim / 2;
                 for (int64_t i = 0; i < half; ++i) {
                     // Split-half convention (Qwen), not interleaved. Getting
@@ -259,7 +305,7 @@ bool Simulator::exec_functional(const Instr& in, int64_t index) {
                     double freq = 1.0 / std::pow(static_cast<double>(in.imm_f),
                                                  (2.0 * static_cast<double>(i)) /
                                                      static_cast<double>(head_dim));
-                    double angle = static_cast<double>(pos) * freq;
+                    double angle = static_cast<double>(pos + r) * freq;
                     float c = static_cast<float>(std::cos(angle));
                     float s = static_cast<float>(std::sin(angle));
                     float a = v[i], b = v[i + half];
@@ -286,8 +332,29 @@ bool Simulator::exec_functional(const Instr& in, int64_t index) {
             return true;
         }
 
+        case Op::V_COPY: {
+            // 2-D STRIDED MOVE: `rows` runs of `cols`, with independent source
+            // and destination strides. This is the on-chip counterpart of the
+            // DMA's 2-D descriptor, and it exists because the MXU writes a tile
+            // PACKED as [m, n] while the activation it belongs to is a column
+            // slice of a wider [m, OUT] block. Somebody has to place it; giving
+            // the VPU a strided move is cheaper in hardware than giving the
+            // systolic array's writeback port an output stride.
+            uint32_t s = in.arg[0], d = in.arg[1];
+            int64_t cols = in.arg[2];
+            int64_t rows = vrows(in.arg[3]);
+            int64_t ss = vstride(in.arg[4], cols), ds = vstride(in.arg[5], cols);
+            if (cols <= 0) return fail("non-positive copy width");
+            const float* sp = spm_at_c(s, (rows - 1) * ss + cols);
+            float* dp = spm_at(d, (rows - 1) * ds + cols);
+            if (!sp) return fail(spm_fault(s, (rows - 1) * ss + cols));
+            if (!dp) return fail(spm_fault(d, (rows - 1) * ds + cols));
+            for (int64_t r = 0; r < rows; ++r)
+                std::copy_n(sp + r * ss, cols, dp + r * ds);
+            return true;
+        }
+
         case Op::V_ADD:
-        case Op::V_COPY:
         case Op::V_SCALE: {
             uint32_t s = in.arg[0], d = in.arg[1];
             int64_t len = in.arg[2];
@@ -297,7 +364,6 @@ bool Simulator::exec_functional(const Instr& in, int64_t index) {
             if (!dp) return fail(spm_fault(d, len));
             for (int64_t i = 0; i < len; ++i) {
                 if (in.op == Op::V_ADD) dp[i] += sp[i];
-                else if (in.op == Op::V_COPY) dp[i] = sp[i];
                 else dp[i] = sp[i] * in.imm_f;
             }
             return true;
@@ -404,23 +470,31 @@ SimStatus Simulator::run(const Program& p) {
                 stats_.mxu_busy_cycles += dur;
                 break;
             case Op::V_RMSNORM:
-                dur = vpu_cycles(in.arg[3], 8);  // + reduction latency
+                // The per-row reduction latency is paid once per row.
+                dur = vpu_cycles(static_cast<int64_t>(in.arg[3]) * vrows(in.arg[4]),
+                                 8 * vrows(in.arg[4]));
                 stats_.vpu_busy_cycles += dur;
                 break;
-            case Op::V_SOFTMAX:
-                dur = vpu_cycles(static_cast<int64_t>(in.arg[1]) * 3, 8);  // max, exp, normalise
+            case Op::V_SOFTMAX: {
+                const int64_t rows = vrows(in.arg[2]);
+                const int64_t n = softmax_elems(in.arg[1], rows, vstride(in.arg[3], in.arg[1]));
+                dur = vpu_cycles(n * 3, 8 * rows);  // max, exp, normalise
                 stats_.vpu_busy_cycles += dur;
                 break;
+            }
             case Op::V_ROPE:
-                dur = vpu_cycles(static_cast<int64_t>(in.arg[1]) * in.arg[3], 4);
+                dur = vpu_cycles(static_cast<int64_t>(in.arg[1]) * in.arg[3] * vrows(in.arg[4]), 4);
                 stats_.vpu_busy_cycles += dur;
                 break;
             case Op::V_SILU_MUL:
                 dur = vpu_cycles(in.arg[3], 4);
                 stats_.vpu_busy_cycles += dur;
                 break;
-            case Op::V_ADD:
             case Op::V_COPY:
+                dur = vpu_cycles(static_cast<int64_t>(in.arg[2]) * vrows(in.arg[3]), 1);
+                stats_.vpu_busy_cycles += dur;
+                break;
+            case Op::V_ADD:
             case Op::V_SCALE:
                 dur = vpu_cycles(in.arg[2], 1);
                 stats_.vpu_busy_cycles += dur;

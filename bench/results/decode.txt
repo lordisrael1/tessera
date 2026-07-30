@@ -10,12 +10,12 @@ ModelConfig{
   tie_word_embeddings=true
 }
 prompt = "The capital of France is"  (5 tokens)
-weights loaded in 44.93 s  (int8, 947 MB resident)
+weights loaded in 27.50 s  (int8, 947 MB resident)
 
 The capital of France is Paris. It is the largest city in Europe and the third largest in the world. It is located in the south of France, on the banks of the River
 
 [32 greedy tokens generated]
-decode: 48.9 ms/token (20.46 tok/s), effective weight bandwidth 19.4 GB/s
+decode: 45.3 ms/token (22.07 tok/s), effective weight bandwidth 20.9 GB/s
 activation high-water = 79.2 KB per token
 ModelConfig{
   hidden_size=896
@@ -29,10 +29,10 @@ ModelConfig{
   tie_word_embeddings=true
 }
 prompt = "The capital of France is"  (5 tokens)
-weights loaded in 14.43 s  (fp32, 1976 MB resident)
+weights loaded in 8.27 s  (fp32, 1976 MB resident)
 
 The capital of France is Paris. It is the largest city in Europe and the third largest city in the world. It is located in the south of France, on the banks of the
 
 [32 greedy tokens generated]
-decode: 102.4 ms/token (9.77 tok/s), effective weight bandwidth 19.3 GB/s
+decode: 103.9 ms/token (9.63 tok/s), effective weight bandwidth 19.0 GB/s
 activation high-water = 79.2 KB per token

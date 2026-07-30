@@ -208,12 +208,96 @@ laptop is bandwidth-starved; T1, having fixed bandwidth by design (256 GB/s and
 an explicit scratchpad), immediately exposes the *next* constraint underneath.
 
 And the fix is not a better schedule. `matmul_cycles(m, n, k)` rounds `m` up to
-32, so **a batch of 32 tokens would cost the same cycles as a batch of 1** —
-32× the work for free. Continuous batching stops being a throughput nicety and
-becomes the single highest-value thing left to build, which is exactly what M4
-is. The M3 measurement wrote M4's justification.
+32, so **a batch of 32 tokens should cost the same cycles as a batch of 1** —
+32× the work for free.
 
-## 5. Testing
+That was a prediction when this section was first written. §5 went and collected
+it: **31.7×, measured, bit-exact.** Batching stops being a throughput nicety and
+becomes the highest-value thing the machine is asking for.
+
+## 5. Prefill: the 32× that was sitting in the timing model
+
+§4 ended by observing that `matmul_cycles` rounds `m` up to the array
+dimension, so a batch of 32 tokens should cost about the same as a batch of 1.
+That was a prediction. `lower_prefill` is the experiment, and this is the
+result — same machine, same weights, same 32 tokens, **verified bit-identical**:
+
+| | 32 decode steps | 1 prefill chunk | ratio |
+|---|--:|--:|--:|
+| cycles | 808,077,440 | **25,466,046** | **31.7×** |
+| time @ 1 GHz | 808.08 ms | 25.47 ms | |
+| instructions | 142,752 | 5,901 | 24.2× |
+| DMA traffic | ~63.2 GB | **1.99 GB** | 31.8× |
+| array efficiency | 2.88% | **67.77%** | 23.5× |
+| last token's logits | — | **bit-exact vs decode** | |
+
+**Thirty-two tokens for the price of one, and the arithmetic is identical to the
+last bit.** The weights are streamed once instead of thirty-two times, which is
+where the DMA ratio comes from, and the systolic array stops running 31 of its
+32 rows empty, which is where the cycle ratio comes from.
+
+### Why 67.8% and not 96%
+
+A projection tile at M=32 is `matmul_cycles(32, 585, 896)` = 17,088 cycles for
+16,773,120 MACs against a capacity of 17,498,112 — **95.9% efficient**. The
+whole-chunk figure is 67.8% because of one instruction: **the output projection
+still runs at m=1**, and it is 26% of the cycles.
+
+That is correct, not a missed optimisation. Prefill exists to fill the KV cache;
+only the *last* token's logits are ever read, and producing the other 31 rows
+would cost a 545 MB sweep of the embedding matrix each to compute distributions
+nobody samples. So the residual inefficiency is inherent to what prefill is for,
+and it is concentrated in exactly one place — which is a much better position
+than having it smeared across every matmul in the model.
+
+### What had to change
+
+Three things, and only the first was expected:
+
+1. **The projections take an `M`.** `X` is `[M, IN]`, `Y` is `[M, OUT]`, and each
+   tile computes a *column slice* of `Y`. MATMUL writes `C` packed as `[m, n]`,
+   which at M=1 happens to be exactly the slice it belongs to and at M>1 is not.
+   So a tile writes a packed scratch and a 2-D strided `V_COPY` places it —
+   about 3% of the tile's matmul cycles, and the price of not putting an output
+   stride on the systolic array's writeback port. Single-tile projections skip
+   it: `C` is already the whole of `Y`.
+
+2. **Causal masking became a hardware feature.** `V_SOFTMAX` gained rows and a
+   causal ramp that zeroes past each row's boundary — which the bible's original
+   ISA sketch had already called for (*"causal handled by cols per row"*). The
+   zeroing is what lets a single `[M, KEYS] · [KEYS, HD]` matmul do the AV
+   product for every query row at once, because the masked entries contribute
+   exactly `0.0` and adding `0.0` to a double accumulator is a no-op. That last
+   detail is why the reference can sum only the valid prefix and still match bit
+   for bit.
+
+3. **The bias needed broadcasting.** With `kFlagAccumulate` seeding the
+   accumulator from `C`, the bias has to appear in all M token rows. A DMA
+   descriptor with **`row_stride = 0`** re-reads the same OUT floats M times —
+   a broadcast that costs the engine nothing and needed no new opcode.
+
+### The scratchpad sets the chunk size, and that is the real constraint
+
+The activation working set scales with M (~81 KB per token for this model —
+the same 79.2 KB the M1 arena measured, plus attention scratch), against a fixed
+8 MB scratchpad shared with two 2 MB weight banks. `max_prefill_tokens()`
+computes the bound from the same arithmetic the allocator uses:
+
+**42 tokens for Qwen2.5-0.5B on T1.** At M=32 the high-water is 7,421,952 B of
+8,388,608 B — 88% full.
+
+So the bible's prefill buckets of {128, 512, 2048} are *not reachable on this
+machine*, and no amount of scheduling changes that: it is 8 MB against 81 KB per
+token. A long prompt is several chunks, which is exactly what production systems
+call chunked prefill, and `lower_prefill` takes a `base` so chunks compose. The
+test covers 5 tokens as one chunk, as 3+2, and as five chunks of 1 — all three
+bit-identical to each other and to decode.
+
+This is the most useful thing the simulator has said so far, because it is a
+*design* answer rather than a tuning one: **if you want longer prefill chunks on
+T1, you buy scratchpad, not MACs.**
+
+## 6. Testing
 
 Two gates, deliberately different in cost:
 
@@ -231,14 +315,20 @@ cannot drift into testing different semantics. That reference is written
 directly against `ops::` and shares no code with the compiler — a reference that
 shares code with the thing it checks proves nothing.
 
-## 6. What the compiler does not do
+## 7. What the compiler does not do
 
-- **No prefill programs.** `lower_decode_step` only; `m` is always 1. The ISA and
-  simulator both support `m > 1` and §4 says that is where the performance is.
+- **No whole-prompt prefill.** Chunks are capped at 42 tokens by the scratchpad
+  (§5), so a long prompt is several programs. Composing them is the caller's job
+  today; scheduling them against a KV cache is M4's.
+- **No batching across *requests*.** `lower_prefill` batches tokens of one
+  sequence. Continuous batching — many sequences at different positions sharing
+  one matmul — is M4, and §5 is its justification.
 - **No k-splitting.** Tiles split the output dimension only. A projection whose
   *reduction* dimension exceeds a bank would need it; none in this model does
   (`down_proj`'s 4864 still fits at 107 rows per tile). `kFlagAccumulate` exists
-  and is specified to make it value-exact when it arrives.
+  and is specified to make it value-exact when it arrives — and prefill now
+  exercises that seeding path for every biased projection, so the rounding
+  contract is tested rather than merely written down.
 - **No SPM residency across layers.** Every layer re-streams its own weights,
   which is correct for decode (they are read once each anyway) and would be
   wasteful for prefill.

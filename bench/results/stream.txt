@@ -1,17 +1,17 @@
 stream_bench: 192 MiB per array (25165824 doubles), 12 reps
   L3 is 16 MiB on the target machine, so 12x L3 -> pure DRAM.
 
-threads=1   copy   12.2/ 18.4  scale  13.9/ 20.9  add    15.8/ 21.0  triad  16.0/ 21.4  triad-nt  22.6/ 22.6    (GB/s stream-counted / true-traffic)
-threads=2   copy   15.7/ 23.6  scale  17.3/ 26.0  add    17.5/ 23.3  triad  19.5/ 26.0  triad-nt  30.5/ 30.5    (GB/s stream-counted / true-traffic)
-threads=3   copy   16.6/ 24.8  scale  16.3/ 24.5  add    17.8/ 23.8  triad  19.9/ 26.5  triad-nt  31.8/ 31.8    (GB/s stream-counted / true-traffic)
-threads=4   copy   17.2/ 25.8  scale  17.3/ 25.9  add    19.9/ 26.6  triad  19.5/ 25.9  triad-nt  29.2/ 29.2    (GB/s stream-counted / true-traffic)
-threads=6   copy   16.2/ 24.2  scale  17.3/ 25.9  add    19.7/ 26.2  triad  20.0/ 26.6  triad-nt  29.9/ 29.9    (GB/s stream-counted / true-traffic)
-threads=8   copy   17.1/ 25.6  scale  16.9/ 25.3  add    19.3/ 25.8  triad  19.4/ 25.8  triad-nt  29.4/ 29.4    (GB/s stream-counted / true-traffic)
-threads=12  copy   17.5/ 26.3  scale  17.6/ 26.5  add    19.5/ 25.9  triad  19.1/ 25.4  triad-nt  28.6/ 28.6    (GB/s stream-counted / true-traffic)
+threads=1   copy   13.8/ 20.7  scale  15.2/ 22.9  add    16.0/ 21.4  triad  16.9/ 22.6  triad-nt  27.3/ 27.3    (GB/s stream-counted / true-traffic)
+threads=2   copy   16.9/ 25.3  scale  18.2/ 27.3  add    20.2/ 27.0  triad  20.6/ 27.4  triad-nt  33.0/ 33.0    (GB/s stream-counted / true-traffic)
+threads=3   copy   18.3/ 27.4  scale  18.7/ 28.1  add    21.1/ 28.1  triad  21.0/ 28.0  triad-nt  32.5/ 32.5    (GB/s stream-counted / true-traffic)
+threads=4   copy   18.2/ 27.3  scale  18.2/ 27.4  add    20.6/ 27.4  triad  20.5/ 27.4  triad-nt  31.5/ 31.5    (GB/s stream-counted / true-traffic)
+threads=6   copy   18.0/ 27.0  scale  17.9/ 26.8  add    20.1/ 26.8  triad  20.1/ 26.7  triad-nt  29.9/ 29.9    (GB/s stream-counted / true-traffic)
+threads=8   copy   17.6/ 26.4  scale  17.9/ 26.9  add    19.5/ 26.0  triad  19.5/ 26.1  triad-nt  28.8/ 28.8    (GB/s stream-counted / true-traffic)
+threads=12  copy   17.5/ 26.2  scale  17.5/ 26.2  add    19.3/ 25.8  triad  19.1/ 25.4  triad-nt  28.1/ 28.1    (GB/s stream-counted / true-traffic)
 
 === MEMORY ROOF ===
-  triad, best over thread counts: 20.0 GB/s stream-counted, 26.6 GB/s true traffic (at 6 threads)
-  DDR4-3200 dual channel theoretical = 51.2 GB/s -> 52% of peak
+  triad, best over thread counts: 21.0 GB/s stream-counted, 28.0 GB/s true traffic (at 3 threads)
+  DDR4-3200 dual channel theoretical = 51.2 GB/s -> 55% of peak
   Use the TRUE number as the roofline's memory ceiling.
 
 wrote bench/results/stream.csv

@@ -1,34 +1,34 @@
 peak_bench: hardware_concurrency=12, assuming 6 physical cores
   AVX2+FMA available: yes
 
-fp32-fma    1 thread    104.5 GOP/s |  6 threads    431.4 | 12 threads (SMT)    552.6   scaling 4.13x
+fp32-fma    1 thread    112.0 GOP/s |  6 threads    507.4 | 12 threads (SMT)    578.9   scaling 4.53x
              vfmadd231ps, 8 lanes x 2 flop
-i8-actual   1 thread    236.1 GOP/s |  6 threads    995.4 | 12 threads (SMT)   1248.1   scaling 4.22x
+i8-actual   1 thread    235.8 GOP/s |  6 threads    967.5 | 12 threads (SMT)   1266.5   scaling 4.10x
              vpsignb+vpmaddubsw+vpmaddwd+vpaddd, 32 MAC / 4 ops
-i8-nosign   1 thread    237.2 GOP/s |  6 threads    975.7 | 12 threads (SMT)   1203.8   scaling 4.11x
+i8-nosign   1 thread    250.2 GOP/s |  6 threads   1040.4 | 12 threads (SMT)   1301.7   scaling 4.16x
              vpmaddubsw+vpmaddwd+vpaddd,       32 MAC / 3 ops
 
 === COMPUTE ROOF (10 s burst) ===
-  fp32 FMA        :    431.4 GFLOP/s all-core (104.5 per core)
-  INT8 as we run  :    995.4 GOP/s   all-core (236.1 per core)
-  INT8 w/o vpsignb:    975.7 GOP/s   -> the sign fixup costs -2%
-  [extrapolated] a single-uop vpdpbusd would give ~2927.1 GOP/s
+  fp32 FMA        :    507.4 GFLOP/s all-core (112.0 per core)
+  INT8 as we run  :    967.5 GOP/s   all-core (235.8 per core)
+  INT8 w/o vpsignb:   1040.4 GOP/s   -> the sign fixup costs 7%
+  [extrapolated] a single-uop vpdpbusd would give ~3121.3 GOP/s
   NOT MEASURED — Zen 3 has no VNNI. Printed to size the gap that a
   fixed-function INT8 datapath closes for free.
 
 === SUSTAINED (60 s, all cores, fp32 FMA) ===
-  t=  0s     442.4 GFLOP/s
-  t=  5s     440.0 GFLOP/s
-  t= 10s     419.4 GFLOP/s
-  t= 15s     446.9 GFLOP/s
-  t= 20s     444.8 GFLOP/s
-  t= 25s     444.3 GFLOP/s
-  t= 30s     409.1 GFLOP/s
-  t= 35s     397.9 GFLOP/s
-  t= 40s     378.1 GFLOP/s
-  t= 45s     381.4 GFLOP/s
-  t= 50s     392.9 GFLOP/s
-  t= 55s     411.1 GFLOP/s
-  throttle: 7.1% lost from first window to last
+  t=  0s     475.0 GFLOP/s
+  t=  5s     469.3 GFLOP/s
+  t= 10s     468.9 GFLOP/s
+  t= 15s     478.6 GFLOP/s
+  t= 20s     464.4 GFLOP/s
+  t= 25s     465.0 GFLOP/s
+  t= 30s     471.7 GFLOP/s
+  t= 35s     471.0 GFLOP/s
+  t= 40s     460.7 GFLOP/s
+  t= 45s     464.1 GFLOP/s
+  t= 50s     451.2 GFLOP/s
+  t= 55s     460.1 GFLOP/s
+  throttle: 3.2% lost from first window to last
 
 wrote bench/results/peak.csv

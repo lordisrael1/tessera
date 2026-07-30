@@ -21,7 +21,7 @@ designed around in a custom ISA, and fought again across a simulated cluster.
 | **M0** | Toolchain, repo scaffold, core headers, green tests | ✅ done |
 | **M1** | Reference fp32 forward pass + tokenizer + HuggingFace oracle | ✅ done — max abs logit deviation **1.98e-05**, 64/64 greedy tokens exact |
 | **M2** | AVX2 INT8 GEMM + roofline | ✅ done, with [one honest miss](docs/01-roofline.md) — 24.9% of the compute roof, not the 70% the plan asked for |
-| **M3** | The accelerator: ISA + simulator + compiler | ✅ done — the real 0.5B, compiled to our ISA, **bit-identical** to the CPU on the simulator |
+| **M3** | The accelerator: ISA + simulator + compiler | ✅ done — the real 0.5B, compiled to our ISA, **bit-identical** to the CPU on the simulator, decode **and** prefill |
 | M4 | Runtime: continuous batching, paged KV, fault isolation | ⏳ next |
 | M5 | Tensor parallelism + hand-written collectives (shm/TCP/io_uring) | ⏳ |
 | M6 | MoE: 8-expert top-2, all-to-all dispatch | ⏳ |
@@ -40,14 +40,17 @@ repo, on an idle machine. Raw output is committed in `bench/results/`.
 | the model on the T1 simulator | 4461 instructions, 25.24 M cycles, bit-exact |
 | T1 systolic array at batch 1 | busy 66.4% of cycles, retiring **2.88%** of the MACs it could |
 | the deliberately-flawed scoreboard | costs **27%** of the runtime — double buffering under it is worth *zero* |
+| prefilling 32 tokens as one chunk | **31.7× fewer cycles**, array efficiency 2.88% → **67.8%**, bit-exact |
+| largest prefill chunk that fits | **42 tokens** — set by the 8 MB scratchpad, not by the model |
 
 The thesis, in one line: **decode is memory-bandwidth-starved by ~35× on the
-laptop; fix the bandwidth in silicon and the next wall is the shape of the array,
-which is why batching exists.**
+laptop; fix the bandwidth in silicon and the next wall is the shape of the array
+— which is why batching exists, and why one prefill chunk does 32 tokens for the
+price of one.**
 
 ## Build (5 commands)
 
-The reference path is WSL2 Ubuntu (the bible's target). A Windows-native build
+The reference path is WSL2 Ubuntu. A Windows-native build
 also works — the core is portable and has `_WIN32` branches for mmap.
 
 ```bash
@@ -95,6 +98,7 @@ tools/       fetch_model.sh, dump_logits.py, run_infer, run_sim
 ```bash
 ./build/rel/tools/run_infer --precision i8 --steps 32   # the model, on the CPU
 ./build/rel/tools/run_sim   --steps 1                   # the model, on the chip
+./build/rel/tools/run_sim   --prefill 32                # 32 tokens for the price of 1
 bench/run_all.sh                                        # reproduce every number
 ```
 

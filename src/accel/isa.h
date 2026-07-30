@@ -38,6 +38,19 @@
 //    even when they touch disjoint memory. The flaw is left in deliberately.
 //    M7's profiler is supposed to find it, and "I found it in the trace, here is
 //    the before/after" is the point of having built the profiler at all.
+//
+// A NOTE ON THE VECTOR OPS AND `rows`. Every V_ op takes an optional row count
+// and row stride, so one instruction covers a whole [rows, stride] activation
+// block. This is not a batching afterthought: a transformer's vector work is
+// always "the same reduction, once per token", and a VPU that walks rows is the
+// obvious hardware. Encoding it as one instruction rather than `rows` of them
+// is what keeps a prefill program the same size as a decode program instead of
+// M times larger — see docs/04-compiler.md.
+//
+// ALL OF THEM DEGRADE TO THE SINGLE-ROW CASE WHEN `rows` IS 0 OR 1, and the
+// stride field then defaults to the length. That is what lets the decode
+// programs written before prefill existed keep their exact encoding, and it is
+// why adding this did not perturb a single cycle of the decode measurements.
 // ============================================================================
 
 namespace accel {
@@ -47,12 +60,12 @@ enum class Op : uint8_t {
     DMA_LOAD,    // HBM -> SPM, 2-D strided
     DMA_STORE,   // SPM -> HBM, 2-D strided
     MATMUL,      // SPM: C[m,n] (+)= A[m,k] * B[n,k]^T   (B is row-major [n,k])
-    V_RMSNORM,   // SPM: dst[i] = src[i] * rsqrt(mean(src^2)+eps) * weight[i]
-    V_SOFTMAX,   // SPM: in-place softmax over `len` elements
-    V_ROPE,      // SPM: in-place rotary embedding, split-half convention
+    V_RMSNORM,   // SPM: per row, dst = src * rsqrt(mean(src^2)+eps) * weight
+    V_SOFTMAX,   // SPM: in-place CAUSAL softmax over a [rows, stride] block
+    V_ROPE,      // SPM: in-place rotary embedding, split-half, one pos per row
     V_SILU_MUL,  // SPM: dst[i] = silu(gate[i]) * up[i]
     V_ADD,       // SPM: dst[i] += src[i]              (residual)
-    V_COPY,      // SPM: dst[i]  = src[i]
+    V_COPY,      // SPM: 2-D strided move, dst[r][c] = src[r][c]
     V_SCALE,     // SPM: dst[i]  = src[i] * imm_f
     BARRIER,     // wait for every class in dep_mask to be idle
     HALT,

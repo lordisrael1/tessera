@@ -5,6 +5,90 @@ page. Brutal and honest: what worked, what's fake, what's left.
 
 ---
 
+## 2026-07-30 — Session 5: prefill, and the 32× the timing model promised
+
+### The headline
+**Thirty-two tokens for the price of one, bit-exact.** One prefill chunk of 32
+tokens costs **25,466,046 cycles** against **808,077,440** for the same 32
+tokens as decode steps — **31.7×** — and the last token's logits are identical
+to the decode path's, bit for bit. Array efficiency goes from **2.88% to
+67.8%**.
+
+That number was not discovered, it was *collected*. Session 4 ended by noting
+that `matmul_cycles` rounds `m` up to the array dimension, so a batch of 32
+should cost about what a batch of 1 costs, and wrote it down as the reason to
+build M4. This session went and took it.
+
+### Why it was mostly free
+The ISA already specified `m > 1`, the simulator already timed it, the tiler
+already split the output dimension, and `kFlagAccumulate` had already been given
+its wide-accumulator rounding contract while fixing the bias bug. Four things
+still had to be built:
+
+1. **A row dimension on the vector ops.** `V_RMSNORM`, `V_ROPE`, `V_SOFTMAX` and
+   `V_COPY` grew `rows` and a stride. Every one of them encodes "one row" as
+   **0**, which is why not a single decode program changed by a byte and why the
+   decode measurements came back at *exactly* 25,242,004 and 18,361,229 cycles
+   afterwards. Backward compatibility you can check with a diff of a cycle count
+   is worth more than backward compatibility you assert.
+2. **Causal masking as a hardware feature.** `V_SOFTMAX` row `r` now covers
+   `first_len + r` elements and **zeroes the rest**. The zeroing is the whole
+   trick: it lets one `[M, KEYS] · [KEYS, HD]` matmul do the AV product for every
+   query row, because masked entries contribute exactly `0.0` and adding `0.0`
+   to a double accumulator is a no-op. For a 32-token chunk that is 21,504
+   instructions replaced by 336. The bible's original ISA sketch had this all
+   along — *"causal handled by cols per row"* — and it took building prefill to
+   understand what that line was for.
+3. **A 2-D strided `V_COPY`.** MATMUL writes a tile packed as `[m, n]`; at M=1
+   that happens to be exactly the slice of `Y` it belongs to, and at M>1 it is
+   not. Rather than put an output stride on the systolic array's writeback port,
+   the VPU places the tile. It costs ~3% of the tile's matmul cycles.
+4. **Bias broadcast via `row_stride = 0`.** With the accumulator seeded from C,
+   the bias must appear in all M rows. A DMA descriptor with a zero row stride
+   re-reads the same OUT floats M times. No new opcode, no cost.
+
+### The test caught a bug — in the test's own reference
+The gate is not "prefill matches a reference written next to it". It is
+**"prefill matches the decode path"**, which session 4 had already proved
+against the CPU and, through `logit_parity`, against HuggingFace. Prefill has to
+land on that answer using different instructions, a different tiling, a
+different attention shape, and a causal mask that did not exist in the decode
+program.
+
+First run: one chunk of 5 was exact, but 3+2 and five-chunks-of-1 disagreed
+**with the CPU reference while agreeing with decode exactly**. When the machine
+agrees with an independently-verified path and the reference does not, the
+reference is what is wrong — and it was: `cpu_reference_prefill` read the chunk's
+embeddings from row 0 regardless of `base`, while the compiled DMA descriptor
+correctly read from `act_in + base*H`. Two gates disagreeing is how you find out
+which one is lying.
+
+All three chunkings are now bit-identical to each other, to the CPU, and to
+decode.
+
+### The most useful thing the simulator has said yet
+`max_prefill_tokens()` reports **42 tokens** for Qwen2.5-0.5B on T1, and at M=32
+the scratchpad is 88% full. The bible asked for prefill buckets of {128, 512,
+2048}; **they are not reachable on this machine**, and no scheduling trick
+changes that — it is 8 MB against ~81 KB of activations per token. A long prompt
+is several chunks, which is exactly what production systems call chunked
+prefill, and `lower_prefill` takes a `base` so chunks compose.
+
+That is a *design* answer rather than a tuning one: **if you want longer prefill
+chunks on T1, you buy scratchpad, not MACs.** It is the first time the simulated
+hardware has pushed back on the plan and been right.
+
+### Honest edge on the headline
+67.8% is not 96%. A single projection tile at M=32 measures 95.9% efficient; the
+chunk average is dragged down by the **output projection, which still runs at
+m=1** and is 26% of the cycles. That is correct rather than lazy — prefill only
+needs the last token's logits, and the other 31 rows would each cost a 545 MB
+sweep of the embedding matrix to produce a distribution nobody samples. The
+inefficiency that remains is inherent to what prefill is *for*, and it now sits
+in one identifiable instruction instead of being smeared across the model.
+
+---
+
 ## 2026-07-29 — Session 4: M3 lands — the real model runs on the fake chip
 
 > **Gap in this log.** Session 3 is missing: it produced the M1 numerical oracle

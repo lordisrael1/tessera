@@ -1,0 +1,14 @@
+loaded in 17.6 s
+prompt = "The capital of France is" (5 tokens)
+
+prefill chunk: 32 tokens (SPM allows up to 42)
+  32 decode steps :    808077440 cycles (808.08 ms)  142752 instrs  [19 s sim]
+  1 prefill chunk :     25466046 cycles (25.47 ms)  5901 instrs  [11 s sim]
+  SPM high-water 7421952 B of 8388608 B, 1986.6 MB streamed
+
+                               decode x        prefill      ratio
+  cycles                      808077440       25466046      31.7x
+  array efficiency                2.88%         67.77%      23.5x
+  logits vs decode                    -      BIT-EXACT
+
+M3 GATE: prefill is bit-identical to the decode path it replaces.

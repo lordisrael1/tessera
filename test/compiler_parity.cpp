@@ -96,11 +96,19 @@ int main() {
     LowerReport rep;
     bool printed = false;
 
-    for (int64_t pos = 0; pos < 5; ++pos) {
-        // Fresh "token embedding" for this step, written to the same HBM slot in
-        // both worlds.
-        std::vector<float> tok(static_cast<size_t>(cfg.hidden_size));
-        for (auto& x : tok) x = d(rng);
+    // The same token embeddings are replayed through prefill below, so they are
+    // generated once and kept.
+    const int64_t NTOK = 5;
+    std::vector<std::vector<float>> toks(static_cast<size_t>(NTOK));
+    for (auto& t : toks) {
+        t.resize(static_cast<size_t>(cfg.hidden_size));
+        for (auto& x : t) x = d(rng);
+    }
+    std::vector<float> last_decode_logits;
+
+    for (int64_t pos = 0; pos < NTOK; ++pos) {
+        // This step's token, written to the same HBM slot in both worlds.
+        const std::vector<float>& tok = toks[static_cast<size_t>(pos)];
         for (int64_t i = 0; i < cfg.hidden_size; ++i) {
             sim.hbm()[static_cast<size_t>(L.act_in + i)] = tok[static_cast<size_t>(i)];
             hbm[static_cast<size_t>(L.act_in + i)] = tok[static_cast<size_t>(i)];
@@ -142,6 +150,74 @@ int main() {
                     static_cast<long long>(pos), bad == 0 ? "OK" : "FAIL",
                     static_cast<long long>(sim.stats().cycles),
                     100.0 * sim.stats().mac_utilisation());
+        if (pos == NTOK - 1)
+            last_decode_logits.assign(
+                sim.hbm().begin() + static_cast<long>(L.act_out),
+                sim.hbm().begin() + static_cast<long>(L.act_out + cfg.vocab_size));
+    }
+
+    // -----------------------------------------------------------------------
+    // PREFILL. The same NTOK tokens, compiled as chunks with m > 1.
+    //
+    // The gate is equality with the DECODE path, which the loop above just
+    // proved against the CPU. That is a stronger check than another comparison
+    // against a reference written alongside the feature: prefill has to land on
+    // an answer that was computed by different instructions, a different tiling,
+    // a different attention shape, and a causal mask that did not exist in the
+    // decode program — and it has to land on it exactly.
+    //
+    // Two chunkings are tested. One chunk exercises base = 0; two chunks
+    // exercise base > 0, where the causal ramp starts partway along and the
+    // second chunk must read the KV the first one wrote.
+    // -----------------------------------------------------------------------
+    std::printf("\n  prefill (m > 1):\n");
+    struct Chunking { const char* name; std::vector<int64_t> sizes; };
+    const Chunking chunkings[] = {
+        {"one chunk of 5", {5}},
+        {"two chunks, 3 + 2", {3, 2}},
+        {"five chunks of 1 (degenerate)", {1, 1, 1, 1, 1}},
+    };
+
+    for (const Chunking& ch : chunkings) {
+        // Fresh machine and a fresh KV cache: nothing carries over from decode.
+        Simulator ps(t1, hbm);
+        for (int64_t r = 0; r < NTOK; ++r)
+            for (int64_t i = 0; i < cfg.hidden_size; ++i) {
+                const float v = toks[static_cast<size_t>(r)][static_cast<size_t>(i)];
+                ps.hbm()[static_cast<size_t>(L.act_in + r * cfg.hidden_size + i)] = v;
+                hbm[static_cast<size_t>(L.act_in + r * cfg.hidden_size + i)] = v;
+            }
+        std::vector<float> pk(kcache.size(), 0.0f), pv(kcache.size(), 0.0f);
+        std::vector<float> want_pf(static_cast<size_t>(cfg.vocab_size));
+
+        int64_t base = 0, cycles = 0, instrs = 0;
+        LowerReport prep;
+        for (int64_t n : ch.sizes) {
+            Program pp = lower_prefill(L, base, n, opt, &prep);
+            ps.reset_stats();
+            SimStatus st = ps.run(pp);
+            if (st != SimStatus::OK) std::printf("    SIM ERROR: %s\n", ps.error().c_str());
+            CHECK(st == SimStatus::OK);
+            cycles += ps.stats().cycles;
+            instrs += ps.stats().instructions;
+            cpu_reference_prefill(L, hbm.data(), base, n, pk.data(), pv.data(), want_pf.data());
+            base += n;
+        }
+
+        int bad_cpu = 0, bad_dec = 0;
+        for (int64_t i = 0; i < cfg.vocab_size; ++i) {
+            const float got = ps.hbm()[static_cast<size_t>(L.act_out + i)];
+            if (got != want_pf[static_cast<size_t>(i)]) ++bad_cpu;
+            if (got != last_decode_logits[static_cast<size_t>(i)]) ++bad_dec;
+        }
+        CHECK(bad_cpu == 0);
+        CHECK(bad_dec == 0);
+        std::printf("    %-30s %5lld instrs %8lld cycles  vs CPU %s  vs decode %s\n",
+                    ch.name, static_cast<long long>(instrs), static_cast<long long>(cycles),
+                    bad_cpu == 0 ? "exact" : "DIFFER", bad_dec == 0 ? "exact" : "DIFFER");
+        if (bad_dec)
+            std::printf("      %d/%lld logits differ from the decode path\n", bad_dec,
+                        static_cast<long long>(cfg.vocab_size));
     }
 
     // The compiler's decisions, as an artifact. This log IS the "programming

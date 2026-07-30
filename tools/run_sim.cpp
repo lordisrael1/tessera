@@ -134,6 +134,7 @@ int main(int argc, char** argv) {
     int64_t max_seq = 64;
     LowerOptions opt;
     int disasm = 0;
+    int64_t prefill_n = 0;
     for (int i = 1; i < argc; ++i) {
         if (!std::strcmp(argv[i], "--model") && i + 1 < argc) dir = argv[++i];
         else if (!std::strcmp(argv[i], "--prompt") && i + 1 < argc) prompt = argv[++i];
@@ -142,6 +143,7 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--serial")) opt.software_pipeline = false;
         else if (!std::strcmp(argv[i], "--fine-deps")) opt.coarse_dma_deps = false;
         else if (!std::strcmp(argv[i], "--disasm") && i + 1 < argc) disasm = std::atoi(argv[++i]);
+        else if (!std::strcmp(argv[i], "--prefill") && i + 1 < argc) prefill_n = std::atoll(argv[++i]);
     }
 
     ModelConfig cfg = ModelConfig::from_json_file(dir + "/config.json");
@@ -184,6 +186,111 @@ int main(int argc, char** argv) {
     std::map<int64_t, Bucket> per_layer;
     int64_t total_mismatch = 0;
     std::string generated;
+
+    // -----------------------------------------------------------------------
+    // PREFILL MODE: the same M tokens, once as M decode steps and once as one
+    // prefill chunk. Same machine, same weights, same answer — and that is the
+    // point, because the cycle counts are not remotely the same.
+    // -----------------------------------------------------------------------
+    if (prefill_n > 0) {
+        const int64_t cap = max_prefill_tokens(L, opt);
+        const int64_t M = std::min(prefill_n, std::min(cap, max_seq));
+        if (M < prefill_n)
+            std::printf("NOTE: asked for %lld tokens, scratchpad fits %lld (max_seq %lld).\n",
+                        static_cast<long long>(prefill_n), static_cast<long long>(cap),
+                        static_cast<long long>(max_seq));
+        std::printf("\nprefill chunk: %lld tokens (SPM allows up to %lld)\n",
+                    static_cast<long long>(M), static_cast<long long>(cap));
+
+        // A synthetic prompt of the requested length: the prompt's ids, cycled.
+        // Values are irrelevant to cycle counts and the bit-exactness check
+        // covers whatever we feed.
+        std::vector<int32_t> ids_m(static_cast<size_t>(M));
+        for (int64_t i = 0; i < M; ++i)
+            ids_m[static_cast<size_t>(i)] = ids[static_cast<size_t>(i) % ids.size()];
+
+        // ---- BEFORE: M decode steps, one token at a time ----
+        for (int64_t i = 0; i < cfg.hidden_size; ++i)
+            sim.hbm()[static_cast<size_t>(L.act_in + i)] = 0.0f;
+        int64_t decode_cycles = 0, decode_instrs = 0, decode_macs = 0, decode_mxu = 0;
+        std::vector<float> decode_logits(static_cast<size_t>(cfg.vocab_size));
+        auto td = std::chrono::steady_clock::now();
+        for (int64_t pos = 0; pos < M; ++pos) {
+            const int32_t id = ids_m[static_cast<size_t>(pos)];
+            for (int64_t i = 0; i < cfg.hidden_size; ++i)
+                sim.hbm()[static_cast<size_t>(L.act_in + i)] =
+                    sim.hbm()[static_cast<size_t>(L.embed + id * cfg.hidden_size + i)];
+            Program p = lower_decode_step(L, pos, opt, nullptr);
+            sim.reset_stats();
+            if (sim.run(p) != SimStatus::OK) { std::printf("SIM: %s\n", sim.error().c_str()); return 1; }
+            decode_cycles += sim.stats().cycles;
+            decode_instrs += sim.stats().instructions;
+            decode_macs += sim.stats().mac_ops;
+            decode_mxu += sim.stats().mxu_busy_cycles;
+        }
+        const double dec_arr = decode_mxu ? static_cast<double>(decode_macs) /
+                                                (static_cast<double>(decode_mxu) * 1024.0) : 0.0;
+        for (int64_t i = 0; i < cfg.vocab_size; ++i)
+            decode_logits[static_cast<size_t>(i)] = sim.hbm()[static_cast<size_t>(L.act_out + i)];
+        std::printf("  %lld decode steps : %12lld cycles (%.2f ms)  %lld instrs  [%.0f s sim]\n",
+                    static_cast<long long>(M), static_cast<long long>(decode_cycles),
+                    static_cast<double>(decode_cycles) / 1e6,
+                    static_cast<long long>(decode_instrs),
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - td).count());
+
+        // ---- AFTER: one prefill chunk, on a machine with an empty KV cache ----
+        Simulator ps(t1, std::vector<float>(sim.hbm()));
+        for (int64_t li = 0; li < cfg.num_hidden_layers; ++li)
+            for (int64_t t = 0; t < max_seq; ++t)
+                for (int64_t i = 0; i < KVDIM; ++i) {
+                    ps.hbm()[static_cast<size_t>(L.k_at(li, t) + i)] = 0.0f;
+                    ps.hbm()[static_cast<size_t>(L.v_at(li, t) + i)] = 0.0f;
+                }
+        for (int64_t r = 0; r < M; ++r) {
+            const int32_t id = ids_m[static_cast<size_t>(r)];
+            for (int64_t i = 0; i < cfg.hidden_size; ++i)
+                ps.hbm()[static_cast<size_t>(L.act_in + r * cfg.hidden_size + i)] =
+                    ps.hbm()[static_cast<size_t>(L.embed + id * cfg.hidden_size + i)];
+        }
+        ps.set_trace(true);
+        LowerReport prep;
+        Program pp = lower_prefill(L, 0, M, opt, &prep);
+        auto tp = std::chrono::steady_clock::now();
+        if (ps.run(pp) != SimStatus::OK) { std::printf("SIM: %s\n", ps.error().c_str()); return 1; }
+        const double psim = std::chrono::duration<double>(std::chrono::steady_clock::now() - tp).count();
+        const SimStats& s = ps.stats();
+
+        // Correctness first: the chunk's last token must produce exactly the
+        // logits the decode path produced for the same token.
+        int64_t bad = 0;
+        for (int64_t i = 0; i < cfg.vocab_size; ++i)
+            if (ps.hbm()[static_cast<size_t>(L.act_out + i)] !=
+                decode_logits[static_cast<size_t>(i)]) ++bad;
+        total_mismatch += bad;
+
+        const double arr = s.mxu_busy_cycles
+            ? static_cast<double>(s.mac_ops) / (static_cast<double>(s.mxu_busy_cycles) * 1024.0)
+            : 0.0;
+        std::printf("  1 prefill chunk : %12lld cycles (%.2f ms)  %lld instrs  [%.0f s sim]\n",
+                    static_cast<long long>(s.cycles), static_cast<double>(s.cycles) / 1e6,
+                    static_cast<long long>(s.instructions), psim);
+        std::printf("  SPM high-water %lld B of %lld B, %.1f MB streamed\n",
+                    static_cast<long long>(prep.spm_high_water),
+                    static_cast<long long>(opt.spm_bytes),
+                    static_cast<double>(s.dma_bytes_in + s.dma_bytes_out) / 1e6);
+        std::printf("\n  %-22s %14s %14s %10s\n", "", "decode x" , "prefill", "ratio");
+        std::printf("  %-22s %14lld %14lld %9.1fx\n", "cycles", static_cast<long long>(decode_cycles),
+                    static_cast<long long>(s.cycles),
+                    static_cast<double>(decode_cycles) / static_cast<double>(s.cycles));
+        std::printf("  %-22s %13.2f%% %13.2f%% %9.1fx\n", "array efficiency", 100.0 * dec_arr,
+                    100.0 * arr, dec_arr > 0.0 ? arr / dec_arr : 0.0);
+        std::printf("  %-22s %14s %14s\n", "logits vs decode", "-",
+                    bad == 0 ? "BIT-EXACT" : "MISMATCH");
+        std::printf("\n%s\n", bad == 0
+            ? "M3 GATE: prefill is bit-identical to the decode path it replaces."
+            : "M3 GATE FAILED: prefill and decode disagree.");
+        return bad == 0 ? 0 : 1;
+    }
 
     const int64_t nsteps = static_cast<int64_t>(ids.size()) + steps;
     for (int64_t pos = 0; pos < nsteps && pos < max_seq; ++pos) {
